@@ -55,6 +55,28 @@ def thermal_w(geometry,temps,coefficients=None):
     return {'electronics_motors_w':finite(coefficients.get('electronics_motors_w'),35,0,1000),'bed_loss_w':bed,'hotend_loss_w':hotend,'chamber_loss_w':chamber}
 
 
+def preparation_reference(telemetry,printer,temps,geometry):
+    """Use only same-machine preparation sessions at matching thermal conditions."""
+    record=(telemetry.get('preparation') or {}).get(printer) or {}
+    if record.get('status')!='READY':return None
+    matched=[];collected=finite(telemetry.get('collected_at_ts'),None,0,1e12)
+    for session in (record.get('sessions') or [])[:1000]:
+        energy=finite(session.get('energy_wh'),None,0,10000)
+        seconds=finite(session.get('seconds'),None,1,7200)
+        bed=finite(session.get('bed_c'),None,0,150);nozzle=finite(session.get('nozzle_c'),None,0,450)
+        end=finite(session.get('end_ts'),None,0,1e12)
+        if None in (energy,seconds,bed,nozzle,end) or collected is None or not 0<=collected-end<=28*86400:continue
+        if abs(bed-temps['bed_c'])>5 or abs(nozzle-temps['nozzle_c'])>15:continue
+        if geometry.get('active_chamber'):
+            chamber=finite(session.get('chamber_c'),None,0,120)
+            if chamber is None or abs(chamber-temps['chamber_c'])>5:continue
+        matched.append((energy,seconds))
+    if len(matched)<2:return None
+    return {'printer':printer,'sample_count':len(matched),'energy_wh':sum(p[0] for p in matched)/len(matched),
+        'seconds':sum(p[1] for p in matched)/len(matched),'method':record.get('method'),
+        'is_current_job_measurement':False}
+
+
 def estimate_energy(data,policy):
     model=policy.get('energy_model')
     if not model:return None  # Preserve old immutable policy snapshots.
@@ -67,6 +89,9 @@ def estimate_energy(data,policy):
     candidates=[]
     for key,profiles in policy.get('energy_telemetry',{}).get('profiles',{}).items():
         for p in profiles:
+            # A whole-plug total may include AMS drying. Do not transfer that
+            # accessory load to a different machine through thermal scaling.
+            if key!=printer and p.get('auxiliary_loads_included'):continue
             if key not in geometries or not all(finite(p.get(k),None,0,500) is not None for k in ('bed_c','nozzle_c')):continue
             ref_temps={'bed_c':p['bed_c'],'nozzle_c':p['nozzle_c'],'chamber_c':p.get('chamber_c') or 25,'ambient_c':25,'heated_hotends':1}
             reference_raw=sum(thermal_w(geometries[key],ref_temps,coefficients).values())
@@ -90,6 +115,9 @@ def estimate_energy(data,policy):
         reference={'printer':key,**p,'scale':scale}
         if key!=printer:assumptions.append('OTHER_MACHINE_THERMAL_SCALING')
         if not close:assumptions.append('TEMPERATURE_GEOMETRY_EXTRAPOLATION_NOT_MEASURED')
+        if p.get('auxiliary_loads_included'):
+            assumptions.append('ACCESSORY_POWER_INCLUDED_IN_METER_TOTAL_NOT_ADDED_AGAIN')
+            if not close:assumptions.append('AGGREGATE_ACCESSORY_LOAD_SCALED_WITH_THERMAL_PROXY')
     seconds=job_quantity(data.get('duration_seconds'),'duration_seconds',integer=True)
     grams=job_quantity(data.get('grams'),'grams')
     # Only add polymer sensible heating to uncalibrated estimates. Measured averages already include it.
@@ -97,12 +125,30 @@ def estimate_energy(data,policy):
     width,depth=geometry.get('bed_mm',[250,250])
     # One cold start, 3 mm aluminium equivalent bed, 80% warm-up efficiency.
     warmup_wh=(float(width)*float(depth)/1e6*.003*2700*900*max(0,temps['bed_c']-temps['ambient_c'])/3600/.8)
-    assumptions.extend(['BED_BUILD_VOLUME_PROXY_NOT_PHYSICAL_HEATER_AREA','COLD_START_3MM_ALUMINIUM_EQUIVALENT_80_PERCENT',
+    observed_preparation=preparation_reference(policy.get('energy_telemetry',{}),printer,temps,geometry)
+    duration_scope=(data.get('process_settings') or {}).get('duration_scope','UNKNOWN')
+    printing_seconds=seconds;preparation_method='THEORETICAL_COLD_START'
+    if observed_preparation and duration_scope in ('PRINT_ONLY','TOTAL_WITH_PREPARATION'):
+        preparation_seconds=Decimal(str(observed_preparation['seconds']))
+        if duration_scope=='PRINT_ONLY' or seconds>=preparation_seconds:
+            warmup_wh=observed_preparation['energy_wh']
+            preparation_method='HA_MATCHED_PREPARATION_HISTORY'
+            if duration_scope=='TOTAL_WITH_PREPARATION':printing_seconds=seconds-preparation_seconds
+            assumptions.append('MATCHED_HISTORICAL_PREPARATION_NOT_CURRENT_JOB_MEASUREMENT')
+        else:assumptions.append('PREPARATION_LONGER_THAN_TOTAL_DURATION_FALLBACK')
+    elif observed_preparation:assumptions.append('PREPARATION_DURATION_SCOPE_UNKNOWN_THEORETICAL_WARMUP')
+    if preparation_method=='THEORETICAL_COLD_START':assumptions.append('COLD_START_3MM_ALUMINIUM_EQUIVALENT_80_PERCENT')
+    assumptions.extend(['BED_BUILD_VOLUME_PROXY_NOT_PHYSICAL_HEATER_AREA',
                         'HEAT_LOSS_COEFFICIENTS_ASSUMED','NO_DIRECT_JOB_ENERGY_METER'])
     if policy.get('energy_telemetry',{}).get('sync_stale'):assumptions.append('HA_SYNC_STALE_USING_CACHED_HISTORY')
-    kwh=(Decimal(str(watts))*Decimal(str(seconds))/Decimal(3600000)+Decimal(str(warmup_wh+polymer_wh))/1000) if seconds else Decimal(0)
+    accessory_accounting='INCLUDED_IN_REFERENCE_METER_TOTAL' if reference and reference.get('auxiliary_loads_included') else 'NOT_CALIBRATED'
+    if accessory_accounting=='NOT_CALIBRATED':assumptions.append('ATTACHED_ACCESSORY_POWER_NOT_CALIBRATED')
+    kwh=(Decimal(str(watts))*printing_seconds/Decimal(3600000)+Decimal(str(warmup_wh+polymer_wh))/1000) if seconds else Decimal(0)
     return {'method':method,'kwh':str(kwh),'average_w':watts,'warmup_wh':warmup_wh if seconds else 0,
             'polymer_heat_wh':polymer_wh if seconds else 0,'conditions':temps,'geometry':geometry,'reference':reference,
+            'duration_scope':duration_scope,'pricing_print_seconds':str(printing_seconds),
+            'preparation_method':preparation_method,'preparation_reference':observed_preparation,
+            'accessory_energy_accounting':accessory_accounting,
             'telemetry_collected_at_ts':policy.get('energy_telemetry',{}).get('collected_at_ts'),
             'condition_sources':(data.get('process_settings') or {}).get('energy_condition_sources',{}),
             'thermal_components_w':parts,'model_version':model.get('version'),'assumptions':assumptions,

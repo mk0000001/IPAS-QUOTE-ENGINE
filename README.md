@@ -1,5 +1,33 @@
 # Print Quote Engine
 
+[한국어](#한국어) · [English](#english)
+
+## 한국어
+
+릴리스 **v0.7.0** · 코드 개정 7회(최초 등록 이후 업데이트 6회). [커밋 집계](VERSION_HISTORY.json).
+
+엔진 패키지를 변경한 도달 가능한 비병합 커밋 기준이다. 병합된 개발 이력은 포함하고 문서 전용·시험 전용·호스트 앱 변경과 자동 생성 `_version.py`는 제외한다. 개정 수는 기능 수나 정확도 검증 횟수가 아니다. 버전은 `0.<코드 개정 수>.<릴리스 메타데이터 수정>`이며 과거 결과에 버전이 없으면 미상으로 남긴다.
+
+PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, policy)`에 호스트가 입력과 요금 정책을 전달한다. 공개 저장소에는 운영 요율·고객 데이터·서버 설정·접속정보가 없다. 정책 검증과 이식 가능한 예제 fixture는 계속 개발 중이다.
+
+### 전력과 할인
+
+호스트가 제공한 `energy_model`·`energy_telemetry` 스냅샷으로 전기요금을 추정한다. 조건이 맞는 과거 출력 구간의 평균전력을 우선하고 베드 크기·온도가 다르면 신뢰도가 낮은 열 모델로 환산한다. 이 패키지는 Home Assistant에 접속하거나 인증정보를 저장하지 않는다. `energy_kwh` 직접 입력이 우선하며 모델이 없는 과거 스냅샷은 이전 동작을 유지한다.
+
+`energy`에는 추정 kWh·정상상태 W·초기 예열 Wh·기준 표본 시간·형상·온도 출처와 가정이 남는다. 새 작업을 직접 계측한 값은 아니다. 임시 모델의 전장/모터 35 W, 베드 12 W/m²/K, 가열 핫엔드당 0.12 W/K, 능동 챔버 3.5 W/m²/K와 두께 3 mm 알루미늄 상당 베드·효율 80%는 개발 가정이다. 검증된 제조사 히터 정격이 아니다. 대기 노즐 가열·누설·팬·예열 시간·MMU/건조기·단열·주변온도 영향에는 작업별 실측 보정이 필요하다.
+
+선택 입력 `discount_percent`는 0–100의 십진 문자열이다. 양의 할인에는 최대 500자의 `discount_reason`이 필요하다. 서비스 소계와 배송비에 각각 할인을 적용해 1원 단위 half-up 반올림 후 정책대로 부가세를 다시 계산한다. 원금액·감면액·비율·사유·반올림 근거를 보존하며 새 할인율은 기존 할인에 중첩하지 않고 할인 전 입력부터 다시 계산한다.
+
+```sh
+python -m unittest discover -s tests
+```
+
+관련 자료: [시스템 검증 범위](https://github.com/mk0000001/print-strength-engine/blob/master/docs/system-validation.md).
+
+---
+
+## English
+
 Release: **v0.7.0** · 7 recorded code revisions (6 updates after initial import). [Commit ledger](VERSION_HISTORY.json).
 
 Count includes reachable non-merge commits touching the engine package, including merged development history; excludes documentation-only, tests-only, host-app changes and generated _version.py. It counts commits, not individual features or validated accuracy. Version convention: 0.<code revision count>.<release metadata fix>. Past results without a recorded version remain unknown.
