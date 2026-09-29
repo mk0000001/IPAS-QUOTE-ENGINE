@@ -1,9 +1,9 @@
 {
   "counting_rule": "Reachable non-merge commits modifying the engine package, excluding _version.py; initial import counts as revision 1. Docs, tests-only and host-app changes excluded. Not individual feature counts.",
-  "version": "0.7.0",
-  "revision_count": 7,
-  "update_count": 6,
-  "source_commit": "173afefe03e8dbb90dd0318229bee8aa89c1e7a1",
+  "version": "0.8.0",
+  "revision_count": 8,
+  "update_count": 7,
+  "source_commit": "fdec3db622d502a60b90a6711b189eb854664fff",
   "commits": [
     {
       "commit": "fb15f27c76a865bec12622d9d092a01e2c92b9f9",
@@ -32,6 +32,10 @@
     {
       "commit": "173afefe03e8dbb90dd0318229bee8aa89c1e7a1",
       "subject": "Fix reviewed geometry and calculation regressions"
+    },
+    {
+      "commit": "fdec3db622d502a60b90a6711b189eb854664fff",
+      "subject": "합산 전력과 준비 에너지 계산 보완 / Account for aggregate meters and preparation energy"
     }
   ]
 }
