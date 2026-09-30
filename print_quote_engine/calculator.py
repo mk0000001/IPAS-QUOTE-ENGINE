@@ -34,6 +34,24 @@ def _plain(value):
     return format(value, 'f')
 
 
+def _material_cost(grams, market, pricing):
+    package = _d(market.get('package_price'), 'package_price')
+    weight = _d(market.get('package_weight_g'), 'package_weight_g', D('0.000001'))
+    if _truth(market.get('tax_included')):
+        package /= D('1') + _d(market.get('tax_rate'), 'source_tax_rate')
+    method = pricing.get('method', 'MARKUP_MULTIPLIER')
+    if method == 'MARKUP_MULTIPLIER':
+        # Frozen policies without a method retain their historical formula.
+        return grams * package / weight * D(pricing['markup_multiplier'])
+    if method != 'DOMESTIC_LANDED_COST_PLUS_MARGIN_V1':
+        raise ValueError('UNKNOWN_MATERIAL_PRICING_METHOD')
+    inbound = _d(market.get('inbound_shipping', '0'), 'inbound_shipping')
+    if _truth(market.get('inbound_shipping_tax_included')):
+        inbound /= D('1') + _d(market.get('inbound_shipping_tax_rate'), 'inbound_shipping_tax_rate')
+    margin = _d(pricing.get('procurement_margin_krw'), 'procurement_margin_krw')
+    return grams * (package + inbound + margin) / weight
+
+
 def _size_rule(material, dimensions, policy):
     mapping = policy['size_rate_policy_map'].get(material)
     if not mapping:
@@ -101,11 +119,7 @@ def _calculate(data: dict, policy: dict) -> dict:
 
     grams = _d(data.get('grams'), 'grams')
     market = data.get('material_price') or {}
-    package = _d(market.get('package_price'), 'package_price')
-    weight = _d(market.get('package_weight_g'), 'package_weight_g', D('0.000001'))
-    if _truth(market.get('tax_included')):
-        package /= D('1') + _d(market.get('tax_rate'), 'source_tax_rate')
-    material_amount = grams * package / weight * D(policy['material_pricing']['markup_multiplier'])
+    material_amount = _material_cost(grams, market, policy['material_pricing'])
     components.append(('MATERIAL', '필라멘트', material_amount))
 
     energy_details=None

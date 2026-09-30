@@ -12,6 +12,8 @@ PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, p
 
 ### 전력과 할인
 
+필라멘트 정책의 `method: DOMESTIC_LANDED_COST_PLUS_MARGIN_V1`은 호스트가 제공한 국내 구매가와 포장당 입고 배송비, 고정 조달 마진을 합쳐 사용 중량에 비례해 계산한다. 구매가와 입고 배송비의 포함 세금은 각각 제외한다. 마진은 `procurement_margin_krw`, 입고 배송비 입력은 `material_price.inbound_shipping`과 별도 `inbound_shipping_tax_included`/`inbound_shipping_tax_rate`다. 고객 발송 배송비와 중복하지 않으며 기존 배율을 추가로 적용하지 않는다. method가 없는 과거 정책 스냅샷은 기존 `markup_multiplier` 계산을 유지한다. 운영 가격과 마진은 호스트가 제공한다.
+
 호스트가 제공한 `energy_model`·`energy_telemetry` 스냅샷으로 전기요금을 추정한다. 조건이 맞는 과거 출력 구간의 평균전력을 우선하고 베드 크기·온도가 다르면 신뢰도가 낮은 열 모델로 환산한다. 이 패키지는 Home Assistant에 접속하거나 인증정보를 저장하지 않는다. `energy_kwh` 직접 입력이 우선하며 모델이 없는 과거 스냅샷은 이전 동작을 유지한다.
 
 `energy`에는 추정 kWh·정상상태 W·초기 예열 Wh·기준 표본 시간·형상·온도 출처와 가정이 남는다. 새 작업을 직접 계측한 값은 아니다. 임시 모델의 전장/모터 35 W, 베드 12 W/m²/K, 가열 핫엔드당 0.12 W/K, 능동 챔버 3.5 W/m²/K와 두께 3 mm 알루미늄 상당 베드·효율 80%는 개발 가정이다. 검증된 제조사 히터 정격이 아니다. 대기 노즐 가열·누설·팬·예열 시간·MMU/건조기·단열·주변온도 영향에는 작업별 실측 보정이 필요하다.
