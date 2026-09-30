@@ -35,6 +35,36 @@ class MaterialPricingTests(unittest.TestCase):
         legacy = {'markup_multiplier': '1.3'}
         self.assertEqual(_material_cost(D('100'), self.market, legacy), D('260'))
 
+    def test_vat_inclusive_package_addon_reconstructs_requested_gross_price(self):
+        market = {'package_price': '22000', 'package_weight_g': '1000', 'tax_included': True,
+                  'tax_rate': '0.1', 'inbound_shipping': '4000',
+                  'inbound_shipping_tax_included': True, 'inbound_shipping_tax_rate': '0.1'}
+        pricing = {**self.pricing, 'procurement_margin_krw': '2000',
+                   'margin_tax_included': True, 'margin_tax_rate': '0.1'}
+        # Currency precision excludes repeating-decimal noise before service rounding.
+        self.assertEqual((_material_cost(D('1000'), market, pricing) * D('1.1')).quantize(D('.01')), D('28000.00'))
+        self.assertEqual((_material_cost(D('100'), market, pricing) * D('1.1')).quantize(D('.01')), D('2800.00'))
+        self.assertEqual(_material_cost(D('0'), market, pricing), D('0'))
+        # The same snapshot without the new metadata must retain its original net margin.
+        pricing.pop('margin_tax_included')
+        pricing.pop('margin_tax_rate')
+        self.assertEqual((_material_cost(D('1000'), market, pricing) * D('1.1')).quantize(D('.01')), D('28200.00'))
+
+    def test_margin_tax_is_independent_and_can_be_explicitly_exclusive(self):
+        pricing = {**self.pricing, 'procurement_margin_krw': '55',
+                   'margin_tax_included': True, 'margin_tax_rate': '0.1'}
+        self.assertEqual(_material_cost(D('100'), self.market, pricing), D('250'))
+        pricing['margin_tax_rate'] = '0.25'
+        self.assertEqual(_material_cost(D('100'), self.market, pricing), D('248.8'))
+        pricing['margin_tax_included'] = False
+        self.assertEqual(_material_cost(D('100'), self.market, pricing), D('251'))
+
+    def test_invalid_or_missing_included_margin_tax_rate_is_rejected(self):
+        for value in ('-1', 'NaN', 'Infinity', True, 0.1, '1.1', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _material_cost(D('100'), self.market,
+                               {**self.pricing, 'margin_tax_included': True, 'margin_tax_rate': value})
+
     def test_invalid_shipping_margin_weight_and_method_are_rejected(self):
         for value in ('-1', 'NaN', 'Infinity', True, 1.2):
             with self.subTest(value=value):

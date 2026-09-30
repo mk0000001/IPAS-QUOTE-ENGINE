@@ -49,6 +49,12 @@ def _material_cost(grams, market, pricing):
     if _truth(market.get('inbound_shipping_tax_included')):
         inbound /= D('1') + _d(market.get('inbound_shipping_tax_rate'), 'inbound_shipping_tax_rate')
     margin = _d(pricing.get('procurement_margin_krw'), 'procurement_margin_krw')
+    # Explicit metadata is required: older snapshots used a net package margin.
+    if _truth(pricing.get('margin_tax_included')):
+        margin_rate = _d(pricing.get('margin_tax_rate'), 'margin_tax_rate')
+        if margin_rate > D('1'):
+            raise ValueError('INVALID_MARGIN_TAX_RATE')
+        margin /= D('1') + margin_rate
     return grams * (package + inbound + margin) / weight
 
 
