@@ -4,7 +4,7 @@
 
 ## 한국어
 
-릴리스 **v0.8.0** · 코드 개정 8회(최초 등록 이후 업데이트 7회). [커밋 집계](VERSION_HISTORY.json).
+릴리스 **v0.10.0** · 코드 개정 10회(최초 등록 이후 업데이트 9회). [커밋 집계](VERSION_HISTORY.json).
 
 엔진 패키지를 변경한 도달 가능한 비병합 커밋 기준이다. 병합된 개발 이력은 포함하고 문서 전용·시험 전용·호스트 앱 변경과 자동 생성 `_version.py`는 제외한다. 개정 수는 기능 수나 정확도 검증 횟수가 아니다. 버전은 `0.<코드 개정 수>.<릴리스 메타데이터 수정>`이며 과거 결과에 버전이 없으면 미상으로 남긴다.
 
@@ -12,7 +12,7 @@ PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, p
 
 ### 전력과 할인
 
-필라멘트 정책의 `method: DOMESTIC_LANDED_COST_PLUS_MARGIN_V1`은 호스트가 제공한 국내 구매가와 포장당 입고 배송비, 고정 조달 마진을 합쳐 사용 중량에 비례해 계산한다. 구매가와 입고 배송비의 포함 세금은 각각 제외한다. 마진은 `procurement_margin_krw`, 입고 배송비 입력은 `material_price.inbound_shipping`과 별도 `inbound_shipping_tax_included`/`inbound_shipping_tax_rate`다. 고객 발송 배송비와 중복하지 않으며 기존 배율을 추가로 적용하지 않는다. method가 없는 과거 정책 스냅샷은 기존 `markup_multiplier` 계산을 유지한다. 운영 가격과 마진은 호스트가 제공한다.
+필라멘트 정책의 `method: DOMESTIC_LANDED_COST_PLUS_MARGIN_V1`은 호스트가 제공한 국내 구매가와 포장당 입고 배송비, 고정 조달 마진을 합쳐 사용 중량에 비례해 계산한다. 구매가와 입고 배송비의 포함 세금은 각각 제외한다. 마진은 `procurement_margin_krw`이며 `margin_tax_included`/`margin_tax_rate`로 가산액의 포함 세금을 별도로 지정한다. 필드가 없는 기존 정책은 세전 가산액을 유지한다. 입고 배송비 입력은 `material_price.inbound_shipping`과 별도 `inbound_shipping_tax_included`/`inbound_shipping_tax_rate`다. 고객 발송 배송비와 중복하지 않으며 기존 배율을 추가로 적용하지 않는다. method가 없는 과거 정책 스냅샷은 기존 `markup_multiplier` 계산을 유지한다. 운영 가격과 마진은 호스트가 제공한다.
 
 호스트가 제공한 `energy_model`·`energy_telemetry` 스냅샷으로 전기요금을 추정한다. 조건이 맞는 과거 출력 구간의 평균전력을 우선하고 베드 크기·온도가 다르면 신뢰도가 낮은 열 모델로 환산한다. 이 패키지는 Home Assistant에 접속하거나 인증정보를 저장하지 않는다. `energy_kwh` 직접 입력이 우선하며 모델이 없는 과거 스냅샷은 이전 동작을 유지한다.
 
@@ -30,7 +30,7 @@ python -m unittest discover -s tests
 
 ## English
 
-Release: **v0.8.0** · 8 recorded code revisions (7 updates after initial import). [Commit ledger](VERSION_HISTORY.json).
+Release: **v0.10.0** · 10 recorded code revisions (9 updates after initial import). [Commit ledger](VERSION_HISTORY.json).
 
 Count includes reachable non-merge commits touching the engine package, including merged development history; excludes documentation-only, tests-only, host-app changes and generated _version.py. It counts commits, not individual features or validated accuracy. Version convention: 0.<code revision count>.<release metadata fix>. Past results without a recorded version remain unknown.
 
@@ -44,3 +44,5 @@ Run portable tests with `python -m unittest discover -s tests`.
 Optional quote inputs: `discount_percent` (decimal string, 0–100) and `discount_reason` (required for a positive discount, max 500 characters). Discounts apply to the final service subtotal and shipping; each is rounded to 1 KRW using half-up, and VAT is then recomputed with the supplied tax policy. The returned `discount` breakdown preserves original subtotal/VAT/shipping/total, reductions, percentage, reason, and rounding basis. Applying a new percentage recalculates from the undiscounted inputs rather than compounding the previous discount.
 
 Standalone Decimal-based quote calculation. Call calculate(input, policy). The host supplies its policy; this repository contains no production rates, customer data, server configuration, or credentials. Extracted from PrintOps. Policy validation and portable example fixtures are still being developed.
+
+The optional `DOMESTIC_LANDED_COST_PLUS_MARGIN_V1` policy removes included purchase and inbound-delivery VAT independently, normalizes the host-supplied package add-on using optional `margin_tax_included`/`margin_tax_rate` fields (missing fields preserve the prior pre-tax margin) and adds it, and allocates the sum by consumed grams/package weight. Customer delivery is separate. Missing method preserves historical markup snapshots; the new method never stacks the old multiplier. See [domestic retail references](docs/domestic-retail-references-20261001.md).
