@@ -20,6 +20,8 @@ PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, p
 
 선택 입력 `discount_percent`는 0–100의 십진 문자열이다. 양의 할인에는 최대 500자의 `discount_reason`이 필요하다. 서비스 소계와 배송비에 각각 할인을 적용해 1원 단위 half-up 반올림 후 정책대로 부가세를 다시 계산한다. 원금액·감면액·비율·사유·반올림 근거를 보존하며 새 할인율은 기존 할인에 중첩하지 않고 할인 전 입력부터 다시 계산한다.
 
+여러 파일을 독립 견적하려면 `calculate_batch(items, policy)`를 사용한다. 입력 순서를 보존하고 항목별 성공·실패를 반환하므로 한 파일의 오류가 정상 파일 계산을 폐기하지 않는다. 한 번에 최대 50개이며 파일 분석·저장·권한·멱등성은 호스트 애플리케이션이 담당한다.
+
 ```sh
 python -m unittest discover -s tests
 ```
@@ -46,3 +48,5 @@ Optional quote inputs: `discount_percent` (decimal string, 0–100) and `discoun
 Standalone Decimal-based quote calculation. Call calculate(input, policy). The host supplies its policy; this repository contains no production rates, customer data, server configuration, or credentials. Extracted from PrintOps. Policy validation and portable example fixtures are still being developed.
 
 The optional `DOMESTIC_LANDED_COST_PLUS_MARGIN_V1` policy removes included purchase and inbound-delivery VAT independently, normalizes the host-supplied package add-on using optional `margin_tax_included`/`margin_tax_rate` fields (missing fields preserve the prior pre-tax margin) and adds it, and allocates the sum by consumed grams/package weight. Customer delivery is separate. Missing method preserves historical markup snapshots; the new method never stacks the old multiplier. See [domestic retail references](docs/domestic-retail-references-20261001.md).
+
+For independent per-file quotes, call `calculate_batch(items, policy)`. The result preserves input order and returns item-level success or failure, so one invalid file does not discard valid calculations. Batch size is limited to 50. Host applications remain responsible for file analysis, persistence, authorization and idempotency.
