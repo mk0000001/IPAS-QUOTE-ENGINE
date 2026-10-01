@@ -1,9 +1,9 @@
 {
   "counting_rule": "Reachable non-merge commits modifying the engine package, excluding _version.py; initial import counts as revision 1. Docs, tests-only and host-app changes excluded. Not individual feature counts.",
-  "version": "0.10.0",
-  "revision_count": 10,
-  "update_count": 9,
-  "source_commit": "aa6d7f58233eefb87f535dc950d26615195ee469",
+  "version": "0.11.0",
+  "revision_count": 11,
+  "update_count": 10,
+  "source_commit": "a1de48075f55b5465c565b4d37c2c7d5fb7e912c",
   "commits": [
     {
       "commit": "fb15f27c76a865bec12622d9d092a01e2c92b9f9",
@@ -44,6 +44,10 @@
     {
       "commit": "aa6d7f58233eefb87f535dc950d26615195ee469",
       "subject": "Preserve legacy margins and support VAT-inclusive procurement add-ons"
+    },
+    {
+      "commit": "a1de48075f55b5465c565b4d37c2c7d5fb7e912c",
+      "subject": "Add isolated per-file batch quotation"
     }
   ]
 }
