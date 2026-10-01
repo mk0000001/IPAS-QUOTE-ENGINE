@@ -12,7 +12,7 @@
 
 이 계산은 원가와 설정에 근거한 견적이며 실측 파단하중 검증이 아니다. G-code만으로 사용 제품·건조 상태·층간 접합 품질을 확정할 수 없다. 실제 제품 선택과 원본 감지값을 보고서에 함께 보존한다.
 
-검증: `python -m pytest --noconftest tests -q`.
+검증: `python -m pytest --noconftest tests -q` — 39개 테스트와 36개 하위 검사가 통과했다. 별도 제품별 Decimal 원가, 원본 중량, 베드 옵션 및 과거 정책 스냅샷 호환성을 포함한다. 호스트의 UI·DB·PDF·배포 검증은 별도로 수행하며 이 단위 테스트 결과를 전체 시스템 정확도나 실측 강도 검증으로 해석하지 않는다.
 
 ## English
 
@@ -26,4 +26,4 @@ The representative machine-rate material is the heaviest model row after excludi
 
 Pricing and geometry screening do not validate breaking loads. Actual product selection and original source detections must both be retained in customer reports.
 
-Tests: `python -m pytest --noconftest tests -q`.
+Tests: `python -m pytest --noconftest tests -q` — 39 tests and 36 subtests passed, including per-product Decimal costs, authoritative weights, bed options and frozen-policy compatibility. Host UI, DB, PDF and deployment verification is separate; these unit checks do not establish whole-system accuracy or empirical strength calibration.
