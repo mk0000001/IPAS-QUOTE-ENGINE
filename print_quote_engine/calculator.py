@@ -58,6 +58,48 @@ def _material_cost(grams, market, pricing):
     return grams * (package + inbound + margin) / weight
 
 
+def _bed_fee(extras, policy):
+    bed_policy = policy.get('bed_fee_policy') or {}
+    if 'bed_mode' in extras:
+        raw_mode = extras['bed_mode']
+        if not isinstance(raw_mode, str):
+            raise ValueError('INVALID_BED_MODE')
+        mode = raw_mode.strip().upper()
+        if mode not in {'NONE', 'UNIFY', 'UNIFY_SPECIFIED', 'PURCHASE_SPECIFIED'}:
+            raise ValueError('INVALID_BED_MODE')
+    elif bed_policy and _truth(extras.get('plate_setup')):
+        mode = 'UNIFY'
+    else:
+        # Frozen snapshots without this policy retain the original extras.
+        return None, None
+    landed, share, fee = D('0'), D('0'), D('0')
+    if mode != 'NONE':
+        fees = bed_policy.get('mode_fees_krw') or {}
+        if mode not in fees:
+            raise ValueError('BED_FEE_POLICY_REQUIRED')
+        fee = _d(fees[mode], 'bed_selection_fee')
+        if mode == 'PURCHASE_SPECIFIED':
+            landed = _d(extras.get('bed_landed_cost'), 'bed_landed_cost', D('0.000001'))
+            ratio = _d(bed_policy.get('purchase_landed_cost_share_ratio'), 'bed_landed_cost_share_ratio')
+            if ratio > D('1'):
+                raise ValueError('INVALID_BED_LANDED_COST_SHARE_RATIO')
+            # The input already includes inbound shipping, customs, and taxes.
+            # The requested share is a net service fee before output VAT.
+            share = landed * ratio
+    amount = fee + share
+    labels = {
+        'UNIFY': ('PLATE_STANDARDIZATION', '베드 종류 통일'),
+        'UNIFY_SPECIFIED': ('BED_UNIFICATION_SPECIFIED', '베드 종류 통일·지정'),
+        'PURCHASE_SPECIFIED': ('BED_PURCHASE_SPECIFIED', '베드 신규 구매·종류 지정'),
+    }
+    component = (*labels[mode], amount) if mode != 'NONE' else None
+    details = {'mode': mode, 'landed_cost': _plain(landed), 'landed_cost_share': _plain(share),
+               'selection_fee': _plain(fee), 'amount': _plain(amount),
+               'fee_tax_basis': bed_policy.get('fee_tax_basis', 'NET_SERVICE_FEE_BEFORE_OUTPUT_VAT'),
+               'landed_cost_basis': bed_policy.get('landed_cost_basis', 'FULLY_LANDED_INCLUDING_INBOUND_SHIPPING_CUSTOMS_AND_TAXES')}
+    return component, details
+
+
 def _size_rule(material, dimensions, policy):
     mapping = policy['size_rate_policy_map'].get(material)
     if not mapping:
@@ -125,7 +167,47 @@ def _calculate(data: dict, policy: dict) -> dict:
 
     grams = _d(data.get('grams'), 'grams')
     market = data.get('material_price') or {}
-    material_amount = _material_cost(grams, market, policy['material_pricing'])
+    selections = data.get('material_selections') or []
+    material_breakdown = []
+    used_materials = {material}
+    if selections:
+        seen = set()
+        consumed = D('0')
+        for selected in selections:
+            index = selected.get('usage_index')
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise ValueError('MATERIAL_USAGE_INDEX_INVALID')
+            if index in seen:
+                raise ValueError('DUPLICATE_MATERIAL_USAGE_SELECTION')
+            seen.add(index)
+            row_material = str(selected.get('material') or '').upper()
+            if not row_material:
+                raise ValueError('INVALID_MATERIAL_USAGE_SELECTION')
+            used_materials.add(row_material)
+            row_grams = _d(selected.get('grams'), 'material_selections.grams', D('0.000001'))
+            row_market = selected.get('material_price') or {}
+            amount = _material_cost(row_grams, row_market, policy['material_pricing'])
+            consumed += row_grams
+            material_breakdown.append({
+                'usage_index': index, 'material': row_material,
+                'product': selected.get('selected_product') or row_market.get('reference_product') or row_market.get('product_name') or row_material,
+                'grams': _plain(row_grams), 'amount': _plain(amount), 'material_price': dict(row_market),
+                **{key: selected[key] for key in ('gcode_material', 'gcode_sku_profile', 'sku_profile', 'tool_id', 'color', 'used_for_object', 'used_for_support') if key in selected},
+            })
+        tolerance = max(D('0.01'), D('0.005') * (len(selections) + 1))
+        if abs(consumed - grams) > tolerance:
+            raise ValueError('MATERIAL_USAGE_MASS_MISMATCH')
+        material_amount = sum((D(row['amount']) for row in material_breakdown), D('0'))
+        if len(used_materials) > 1:
+            reasons.append('MULTIMATERIAL_MACHINE_POLICY_REQUIRES_REVIEW')
+        for row_material in used_materials:
+            row_rate = policy['material_rate_key_map'].get(row_material)
+            if not row_rate or row_rate not in policy['base_hourly_rates']:
+                reasons.append('UNKNOWN_OR_UNSUPPORTED_MATERIAL')
+            if _size_rule(row_material, dimensions, policy) is None:
+                reasons.append('SIZE_POLICY_UNRESOLVED')
+    else:
+        material_amount = _material_cost(grams, market, policy['material_pricing'])
     components.append(('MATERIAL', '필라멘트', material_amount))
 
     energy_details=None
@@ -152,8 +234,8 @@ def _calculate(data: dict, policy: dict) -> dict:
     surcharges = []
     colors = _integer(data.get('colors',1),'colors',1)
     if colors>1 and printer=='Q1': reasons.append('Q1_MULTICOLOR_NOT_SUPPORTED')
-    if colors>1 and material in ('TPU','TPE'): reasons.append('FLEXIBLE_MULTICOLOR_NOT_SUPPORTED')
-    if material in ('PA6-CF','PPS-CF') and printer!='Q1': reasons.append('ENGINEERING_REQUIRES_Q1_POOL')
+    if colors>1 and used_materials & {'TPU','TPE'}: reasons.append('FLEXIBLE_MULTICOLOR_NOT_SUPPORTED')
+    if used_materials & {'PA6-CF','PPS-CF'} and printer!='Q1': reasons.append('ENGINEERING_REQUIRES_Q1_POOL')
     color_rule = next((r for r in policy['normal_multicolor_rules'] if int(r['min_colors']) <= colors <= int(r['max_colors'])), None)
     if not color_rule:
         reasons.append('MULTICOLOR_TIER_REQUIRES_MANUAL_REVIEW')
@@ -193,26 +275,30 @@ def _calculate(data: dict, policy: dict) -> dict:
 
     extras = data.get('extras') or {}
     fixed = policy['fixed_fees']
-    if _truth(extras.get('plate_setup')):
+    bed_component, bed_details = _bed_fee(extras, policy)
+    if bed_component:
+        components.append(bed_component)
+    if bed_details is None and _truth(extras.get('plate_setup')):
         components.append(('PLATE_STANDARDIZATION', '플레이트 세팅', D(fixed['PLATE_STANDARDIZATION']['amount_krw'])))
     if _truth(extras.get('nozzle_change')):
         components.append(('NOZZLE_CHANGE', '노즐 교체', D(fixed['NOZZLE_CHANGE']['amount_krw'])))
     if _truth(extras.get('small_nozzle')):
         components.append(('SMALL_NOZZLE_RISK', '0.2 노즐 위험', D(fixed['SMALL_NOZZLE_RISK']['amount_krw'])))
-        if '-CF' in material or '-GF' in material:
+        if any('-CF' in value or '-GF' in value for value in used_materials):
             reasons.append('CF_GF_SMALL_NOZZLE_REQUIRES_MANUAL_REVIEW')
     extra_spools = _integer(extras.get('extra_spools',0),'extra_spools')
     if extra_spools:
         components.append(('EXTRA_SPOOL_HANDLING', '추가 스풀 교체', D(extra_spools) * D(fixed['EXTRA_SPOOL_HANDLING']['amount_krw'])))
-    plate_purchase = _d(extras.get('plate_purchase') or '0', 'plate_purchase')
-    if plate_purchase:
-        components.append(('PLATE_PROCUREMENT', '신규 플레이트 부담', plate_purchase * D(policy['plate_procurement']['customer_share_ratio'])))
+    if bed_details is None:
+        plate_purchase = _d(extras.get('plate_purchase') or '0', 'plate_purchase')
+        if plate_purchase:
+            components.append(('PLATE_PROCUREMENT', '신규 플레이트 부담', plate_purchase * D(policy['plate_procurement']['customer_share_ratio'])))
     if _integer(extras.get('extra_drying_seconds',0),'extra_drying_seconds') > 0:
         reasons.append('EXTRA_DRYING_PRICE_NOT_CONFIGURED')
     if _truth(extras.get('rush')):
         components.append(('RUSH_ANALYSIS', '48시간 분석 Rush', D(policy['rush']['fee_krw'])))
 
-    raw = machine + material_amount + energy + conditional + sum((v for c, _, v in components if c in {'PLATE_STANDARDIZATION','NOZZLE_CHANGE','SMALL_NOZZLE_RISK','EXTRA_SPOOL_HANDLING','PLATE_PROCUREMENT','RUSH_ANALYSIS'}), D('0'))
+    raw = machine + material_amount + energy + conditional + sum((v for c, _, v in components if c in {'PLATE_STANDARDIZATION','BED_UNIFICATION_SPECIFIED','BED_PURCHASE_SPECIFIED','NOZZLE_CHANGE','SMALL_NOZZLE_RISK','EXTRA_SPOOL_HANDLING','PLATE_PROCUREMENT','RUSH_ANALYSIS'}), D('0'))
     unit = D(policy['rounding']['final_service_supply']['unit_krw'])
     subtotal = _ceil(raw, unit)
     shipping = _d(data.get('shipping') or '0', 'shipping')
@@ -255,9 +341,13 @@ def _calculate(data: dict, policy: dict) -> dict:
     return {'currency': 'KRW', 'policy_revision': policy['policy_revision'], 'billable_seconds': billable,
             'components': result_components, 'raw_service_supply': _plain(raw), 'subtotal': _plain(subtotal),
             'vat': _plain(vat), 'shipping': _plain(shipping), 'grand_total': _plain(subtotal + vat + shipping),
-            'discount':discount,'energy':energy_details,
+            'discount':discount,'energy':energy_details,'material_breakdown':material_breakdown,
             'warnings': warnings, 'manual_review_reasons': sorted(set(reasons)),
-            'trace': {'energy':energy_details,'math_context': 'DECIMAL_P50_HALF_EVEN_V1','calculator_version':policy['calculator_version'],'source_sha256':policy['source_sha256'], 'size_rule': size['code'] if size else None,
+            'trace': {'energy':energy_details,'bed_fee':bed_details,'math_context': 'DECIMAL_P50_HALF_EVEN_V1','calculator_version':policy['calculator_version'],'source_sha256':policy['source_sha256'], 'size_rule': size['code'] if size else None,
+                      'material_pricing': {'basis': 'PER_FILAMENT_USAGE' if selections else 'TOTAL_CONSUMED_MASS',
+                                           'primary_material': material, 'amount': _plain(material_amount),
+                                           'grams': _plain(sum((D(row['grams']) for row in material_breakdown), D('0'))) if selections else _plain(grams),
+                                           'selections': material_breakdown},
                       'size_multiplier': _plain(multiplier), 'long_risk_rate': str(long_rate),
                       'conditional_floor': {'activated': floor_activated, 'policy_sum': _plain(surcharge_sum),
                                             'floor_amount': _plain(floor_amount), 'selected': _plain(conditional)},

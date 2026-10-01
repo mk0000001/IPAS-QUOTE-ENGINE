@@ -10,6 +10,8 @@
 
 PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, policy)`에 호스트가 입력과 요금 정책을 전달한다. 공개 저장소에는 운영 요율·고객 데이터·서버 설정·접속정보가 없다. 정책 검증과 이식 가능한 예제 fixture는 계속 개발 중이다.
 
+[필라멘트별 견적·베드 옵션](docs/per-material-pricing.md): 각 실제 제품의 사용량과 원가를 따로 계산하고 베드 준비 옵션의 중복 요금을 막습니다.
+
 ### 전력과 할인
 
 필라멘트 정책의 `method: DOMESTIC_LANDED_COST_PLUS_MARGIN_V1`은 호스트가 제공한 국내 구매가와 포장당 입고 배송비, 고정 조달 마진을 합쳐 사용 중량에 비례해 계산한다. 구매가와 입고 배송비의 포함 세금은 각각 제외한다. 마진은 `procurement_margin_krw`이며 `margin_tax_included`/`margin_tax_rate`로 가산액의 포함 세금을 별도로 지정한다. 필드가 없는 기존 정책은 세전 가산액을 유지한다. 입고 배송비 입력은 `material_price.inbound_shipping`과 별도 `inbound_shipping_tax_included`/`inbound_shipping_tax_rate`다. 고객 발송 배송비와 중복하지 않으며 기존 배율을 추가로 적용하지 않는다. method가 없는 과거 정책 스냅샷은 기존 `markup_multiplier` 계산을 유지한다. 운영 가격과 마진은 호스트가 제공한다.
@@ -36,6 +38,8 @@ Release: **v0.11.0** · 11 recorded code revisions (10 updates after initial imp
 
 Count includes reachable non-merge commits touching the engine package, including merged development history; excludes documentation-only, tests-only, host-app changes and generated _version.py. It counts commits, not individual features or validated accuracy. Version convention: 0.<code revision count>.<release metadata fix>. Past results without a recorded version remain unknown.
 
+
+[Per-filament pricing and bed options](docs/per-material-pricing.md) preserve separate product weights/costs and mutually exclusive bed service fees.
 
 Optional host-supplied `energy_model` and `energy_telemetry` snapshots enable estimated electricity costs. Matched historical print-phase average power is preferred; different bed sizes/temperatures use an explicitly low-confidence thermal scaling model. The host supplies geometry with provenance and telemetry grouped by observed heater temperatures. This package never connects to Home Assistant or stores connection credentials.
 
