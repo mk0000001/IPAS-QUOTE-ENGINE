@@ -128,12 +128,30 @@ def estimate_energy(data,policy):
     observed_preparation=preparation_reference(policy.get('energy_telemetry',{}),printer,temps,geometry)
     duration_scope=(data.get('process_settings') or {}).get('duration_scope','UNKNOWN')
     printing_seconds=seconds;preparation_method='THEORETICAL_COLD_START'
+    print_seconds_basis=('INPUT_PRINT_ONLY_DURATION' if duration_scope=='PRINT_ONLY' else
+                         'TOTAL_INPUT_DURATION_PREPARATION_UNRESOLVED' if duration_scope=='TOTAL_WITH_PREPARATION' else
+                         'UNRESOLVED_FULL_INPUT_DURATION')
+    explicit_model=None
+    settings=data.get('process_settings') or {}
+    if duration_scope=='TOTAL_WITH_PREPARATION' and settings.get('model_print_seconds') is not None:
+        sources=settings.get('energy_condition_sources') or {}
+        if isinstance(sources,dict) and sources.get('model_print_seconds')=='GCODE_MODEL_TIME_HEADER':
+            try:
+                candidate=job_quantity(settings['model_print_seconds'],'model_print_seconds',integer=True)
+                if candidate<=seconds:explicit_model=candidate
+            except ValueError:pass
+        if explicit_model is None:assumptions.append('EXPLICIT_MODEL_PRINT_TIME_UNUSABLE')
+        else:
+            printing_seconds=explicit_model
+            print_seconds_basis='SLICER_EXPLICIT_MODEL_TIME'
     if observed_preparation and duration_scope in ('PRINT_ONLY','TOTAL_WITH_PREPARATION'):
         preparation_seconds=Decimal(str(observed_preparation['seconds']))
         if duration_scope=='PRINT_ONLY' or seconds>=preparation_seconds:
             warmup_wh=observed_preparation['energy_wh']
             preparation_method='HA_MATCHED_PREPARATION_HISTORY'
-            if duration_scope=='TOTAL_WITH_PREPARATION':printing_seconds=seconds-preparation_seconds
+            if duration_scope=='TOTAL_WITH_PREPARATION' and explicit_model is None:
+                printing_seconds=seconds-preparation_seconds
+                print_seconds_basis='HISTORICAL_PREPARATION_DURATION_DIFFERENCE'
             assumptions.append('MATCHED_HISTORICAL_PREPARATION_NOT_CURRENT_JOB_MEASUREMENT')
         else:assumptions.append('PREPARATION_LONGER_THAN_TOTAL_DURATION_FALLBACK')
     elif observed_preparation:assumptions.append('PREPARATION_DURATION_SCOPE_UNKNOWN_THEORETICAL_WARMUP')
@@ -147,6 +165,7 @@ def estimate_energy(data,policy):
     return {'method':method,'kwh':str(kwh),'average_w':watts,'warmup_wh':warmup_wh if seconds else 0,
             'polymer_heat_wh':polymer_wh if seconds else 0,'conditions':temps,'geometry':geometry,'reference':reference,
             'duration_scope':duration_scope,'pricing_print_seconds':str(printing_seconds),
+            'pricing_print_seconds_basis':print_seconds_basis,
             'preparation_method':preparation_method,'preparation_reference':observed_preparation,
             'accessory_energy_accounting':accessory_accounting,
             'telemetry_collected_at_ts':policy.get('energy_telemetry',{}).get('collected_at_ts'),
