@@ -1,9 +1,9 @@
 {
   "counting_rule": "Reachable non-merge commits modifying the engine package, excluding _version.py; initial import counts as revision 1. Docs, tests-only and host-app changes excluded. Not individual feature counts.",
-  "version": "0.12.0",
-  "revision_count": 12,
-  "update_count": 11,
-  "source_commit": "6709497baa0de2f99376b620cd5507ff582363bb",
+  "version": "0.13.0",
+  "revision_count": 13,
+  "update_count": 12,
+  "source_commit": "1178ba904a7c30cca7f861dcabdb36be997eb80e",
   "commits": [
     {
       "commit": "fb15f27c76a865bec12622d9d092a01e2c92b9f9",
@@ -52,6 +52,10 @@
     {
       "commit": "6709497baa0de2f99376b620cd5507ff582363bb",
       "subject": "Price each actual filament separately and unify bed preparation fees"
+    },
+    {
+      "commit": "1178ba904a7c30cca7f861dcabdb36be997eb80e",
+      "subject": "Use explicit slicer model time for energy estimates"
     }
   ]
 }

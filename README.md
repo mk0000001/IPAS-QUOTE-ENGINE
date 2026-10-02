@@ -4,13 +4,15 @@
 
 ## 한국어
 
-릴리스 **v0.12.0** · 코드 개정 12회(최초 등록 이후 업데이트 11회). [커밋 집계](VERSION_HISTORY.json).
+릴리스 **v0.13.0** · 코드 개정 13회(최초 등록 이후 업데이트 12회). [커밋 집계](VERSION_HISTORY.json).
 
 엔진 패키지를 변경한 도달 가능한 비병합 커밋 기준이다. 병합된 개발 이력은 포함하고 문서 전용·시험 전용·호스트 앱 변경과 자동 생성 `_version.py`는 제외한다. 개정 수는 기능 수나 정확도 검증 횟수가 아니다. 버전은 `0.<코드 개정 수>.<릴리스 메타데이터 수정>`이며 과거 결과에 버전이 없으면 미상으로 남긴다.
 
 PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, policy)`에 호스트가 입력과 요금 정책을 전달한다. 공개 저장소에는 운영 요율·고객 데이터·서버 설정·접속정보가 없다. 정책 검증과 이식 가능한 예제 fixture는 계속 개발 중이다.
 
 [필라멘트별 견적·베드 옵션](docs/per-material-pricing.md): 각 실제 제품의 사용량과 원가를 따로 계산하고 베드 준비 옵션의 중복 요금을 막습니다.
+
+[출력·예열 시간 분리](docs/energy-duration-scope-20261003.md): 파일에 명시된 모델 시간은 출력 평균 전력에, 준비 단계는 조건이 맞는 실측 준비 전력에 각각 적용합니다. 같은 플러그의 건조 전력은 중복하지 않습니다.
 
 ### 전력과 할인
 
@@ -34,12 +36,14 @@ python -m unittest discover -s tests
 
 ## English
 
-Release: **v0.12.0** · 12 recorded code revisions (11 updates after initial import). [Commit ledger](VERSION_HISTORY.json).
+Release: **v0.13.0** · 13 recorded code revisions (12 updates after initial import). [Commit ledger](VERSION_HISTORY.json).
 
 Count includes reachable non-merge commits touching the engine package, including merged development history; excludes documentation-only, tests-only, host-app changes and generated _version.py. It counts commits, not individual features or validated accuracy. Version convention: 0.<code revision count>.<release metadata fix>. Past results without a recorded version remain unknown.
 
 
 [Per-filament pricing and bed options](docs/per-material-pricing.md) preserve separate product weights/costs and mutually exclusive bed service fees.
+
+[Print/preparation duration separation](docs/energy-duration-scope-20261003.md) uses corroborated explicit model time for print-average power and matched measured preparation energy for preparation. Accessory power already included in the same meter is not added again.
 
 Optional host-supplied `energy_model` and `energy_telemetry` snapshots enable estimated electricity costs. Matched historical print-phase average power is preferred; different bed sizes/temperatures use an explicitly low-confidence thermal scaling model. The host supplies geometry with provenance and telemetry grouped by observed heater temperatures. This package never connects to Home Assistant or stores connection credentials.
 
