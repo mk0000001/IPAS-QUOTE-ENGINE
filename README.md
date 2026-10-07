@@ -1,6 +1,9 @@
 # IPAS-QUOTE ENGINE
 
-![IPAS · Integrated Printing Analysis System](branding/ipas/ipas-logo.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="branding/ipas/ipas-logo-light.svg">
+  <img src="branding/ipas/ipas-logo.svg" alt="IPAS · Integrated Printing Analysis System">
+</picture>
 
 [한국어](#한국어) · [English](#english)
 
