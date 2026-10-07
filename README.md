@@ -9,6 +9,8 @@
 
 ## 한국어
 
+최신 호스트 릴리스: [IPAS v0.5.26 프로필 자동 선택·가격 근거 보존](docs/ipas-profile-autoselect-20261008.md). 수치 엔진은 G-code v0.28.0·strength v0.24.0·quote v0.13.0을 유지합니다.
+
 **IPAS-QUOTE ENGINE**은 **IPAS / Integrated Printing Analysis System**의 견적 계산 엔진이다. 통합 시스템은 [IPAS-STRENGTH ENGINE](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE), [IPAS-GCODE ENGINE](https://github.com/mk0000001/IPAS-GCODE-ENGINE), [IPAS-QUOTE ENGINE](https://github.com/mk0000001/IPAS-QUOTE-ENGINE)을 연결한다. Python 패키지 이름 `print_quote_engine`은 기존 연동 호환성을 위해 유지한다.
 
 릴리스 **v0.13.0** · 코드 개정 13회(최초 등록 이후 업데이트 12회). [커밋 집계](VERSION_HISTORY.json).
@@ -42,6 +44,8 @@ python -m unittest discover -s tests
 ---
 
 ## English
+
+Latest host release: [IPAS v0.5.26 profile auto-selection and price provenance](docs/ipas-profile-autoselect-20261008.md). Numerical engines remain G-code v0.28.0, strength v0.24.0 and quote v0.13.0.
 
 **IPAS-QUOTE ENGINE** is the quote calculation engine of **IPAS / Integrated Printing Analysis System**. The integrated system connects [IPAS-STRENGTH ENGINE](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE), [IPAS-GCODE ENGINE](https://github.com/mk0000001/IPAS-GCODE-ENGINE), and [IPAS-QUOTE ENGINE](https://github.com/mk0000001/IPAS-QUOTE-ENGINE). The Python package name `print_quote_engine` is retained for compatibility with existing integrations.
 

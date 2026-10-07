@@ -1,0 +1,1033 @@
+diff --git a/app/calculator_api.py b/app/calculator_api.py
+--- a/app/calculator_api.py
++++ b/app/calculator_api.py
+@@ -122,23 +122,46 @@
+       'fixed_fees':{key:value['amount_krw'] for key,value in policy['fixed_fees'].items()},
+       'support_risk_surcharge_rates':policy['support_risk_surcharge_rates']}
+ 
++def _override_decimal(value,*,maximum=Decimal('1000000000000'),positive=False):
++    try:
++        if isinstance(value,bool) or not isinstance(value,(str,int,float,Decimal)) or len(str(value))>60:
++            raise ValueError
++        number=Decimal(str(value))
++        if not number.is_finite() or number<0 or number>maximum or (positive and number<=0):
++            raise ValueError
++    except (ValueError,TypeError,InvalidOperation) as exc:
++        raise DomainError('INVALID_POLICY_SETTING',422) from exc
++    return number
++
++
++def _validate_policy_overrides(data):
++    unknown=set(data)-set(OVERRIDE_KEYS)
++    if unknown:raise DomainError('UNKNOWN_POLICY_SETTING',422)
++    policy=load_policy()
++    map_keys={'base_hourly_rates':set(policy['base_hourly_rates']),
++              'fixed_fees':set(policy['fixed_fees']),
++              'support_risk_surcharge_rates':{'LOW','MEDIUM','HIGH'}}
++    for key,value in data.items():
++        if key in map_keys:
++            if not isinstance(value,dict) or set(value)-map_keys[key]:
++                raise DomainError('INVALID_POLICY_SETTING',422)
++            maximum=Decimal('1') if key=='support_risk_surcharge_rates' else Decimal('1000000000000')
++            for amount in value.values():_override_decimal(amount,maximum=maximum)
++            if key=='support_risk_surcharge_rates':
++                # A map override replaces the saved map, then merges with source
++                # defaults. Validate that resulting order even for partial maps.
++                rates={**policy['support_risk_surcharge_rates'],**value}
++                if not Decimal(str(rates['LOW']))<=Decimal(str(rates['MEDIUM']))<=Decimal(str(rates['HIGH'])):
++                    raise DomainError('INVALID_POLICY_SETTING',422)
++        else:
++            _override_decimal(value,positive=key=='final_rounding_unit')
++
++
+ @router.put('/policy-settings')
+ def update_policy_settings(data:dict):
+-    unknown=set(data)-set(OVERRIDE_KEYS)
+-    if unknown: raise DomainError('UNKNOWN_POLICY_SETTING',422)
++    _validate_policy_overrides(data)
+     with connect() as conn:
+         for key,value in data.items():
+-            if key in ('procurement_margin_krw','energy_unit_rate','rush_fee','final_rounding_unit'):
+-                try:
+-                    if isinstance(value,bool) or not Decimal(str(value)).is_finite() or not (0<=Decimal(str(value))<=Decimal('1000000000000')): raise ValueError
+-                except Exception as exc: raise DomainError('INVALID_POLICY_SETTING',422) from exc
+-            if key=='base_hourly_rates' and (not isinstance(value,dict) or any(Decimal(str(v))<0 for v in value.values())): raise DomainError('INVALID_POLICY_SETTING',422)
+-            if key=='support_risk_surcharge_rates':
+-                if not isinstance(value,dict) or set(value)-{'LOW','MEDIUM','HIGH'}:raise DomainError('INVALID_POLICY_SETTING',422)
+-                try:
+-                    if any(isinstance(v,bool) or not Decimal(str(v)).is_finite() or not (Decimal('0')<=Decimal(str(v))<=Decimal('1')) for v in value.values()):raise ValueError
+-                    if 'HIGH' in value and 'MEDIUM' in value and Decimal(str(value['HIGH']))<Decimal(str(value['MEDIUM'])):raise ValueError
+-                except (ValueError,TypeError,InvalidOperation):raise DomainError('INVALID_POLICY_SETTING',422)
+             conn.execute('''INSERT INTO pricing_policy_overrides(key,value_json,revision,updated_at) VALUES(%s,%s,1,now())
+               ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,revision=pricing_policy_overrides.revision+1,updated_at=now()''',(key,Jsonb(value)))
+         audit(conn,'PRICING_POLICY_OVERRIDE_UPDATED',detail={'keys':sorted(data)})
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,7 +1,7 @@
+ import os
+ from pathlib import Path
+ 
+-VERSION = '0.5.25-ipas-branding'
++VERSION = '0.5.26-profile-autoselect'
+ 
+ def secret(name: str) -> str:
+     file = os.getenv(name + '_FILE')
+diff --git a/app/material_usage_selection.py b/app/material_usage_selection.py
+--- a/app/material_usage_selection.py
++++ b/app/material_usage_selection.py
+@@ -4,7 +4,7 @@
+ import re
+ 
+ from .errors import DomainError
+-from .filament_profiles import enrich_analysis, parse
++from .filament_profiles import enrich_analysis, parse, _configuration_slot, _list, _types
+ 
+ 
+ def _weight(value):
+@@ -30,6 +30,62 @@
+         return _apply(analysis, selections)
+ 
+ 
++def _manual_configuration(analysis, fresh, selections):
++    """Change only configuration slots proven to belong to selected tools."""
++    configuration = deepcopy(analysis.get('configuration') or {})
++    configured = configuration.get('filament_settings_id')
++    profiles = list(_list(configured)) if configured is not None else []
++    types = list(_types(configuration.get('filament_type'))) if configuration.get('filament_type') else []
++    source_rows = fresh['material_usage']
++    bindings = {}
++    if profiles:
++        for index, row in enumerate(source_rows):
++            identity = row['profile_identity']
++            binding = _configuration_slot(analysis, row, profiles, types, row.get('material'))
++            if binding is None or identity['match_status'] != 'matched':
++                continue
++            slot, _ = binding
++            # A raw name alone does not prove that a configuration slot is its
++            # counterpart. Require the fresh parser's identities to agree.
++            configured_identity = parse(profiles[slot], row.get('material'))
++            if (configured_identity['match_status'] == 'matched' and
++                    configured_identity['canonical_profile'] == identity['canonical_profile']):
++                bindings[index] = slot
++    elif (source_rows and all(row['profile_identity'].get('profile_source') == 'MATERIAL_FAMILY_ONLY'
++                             for row in source_rows)):
++        # A manual raw name ends the global metadata-absent fallback. Keep the
++        # other rows' already established Generic identities in proven slots.
++        tools = [row.get('tool_id') for row in source_rows]
++        if (all(isinstance(tool, int) and not isinstance(tool, bool) and 0 <= tool <= 4096 for tool in tools)
++                and len(set(tools)) == len(tools)):
++            for index, row in enumerate(source_rows):
++                binding = (_configuration_slot(analysis, row, [None] * len(types), types, row.get('material'))
++                           if types else None)
++                bindings[index] = binding[0] if binding is not None else row['tool_id']
++            if len(set(bindings.values())) == len(bindings):
++                size = max(bindings.values()) + 1
++                profiles = [None] * max(size, len(types))
++                types.extend([None] * (len(profiles) - len(types)))
++                for index, slot in bindings.items():
++                    profiles[slot] = source_rows[index]['profile_identity']['canonical_profile']
++                    types[slot] = source_rows[index]['material']
++            else:
++                bindings = {}
++    for row in selections:
++        if row['selection_basis'] == 'GCODE_PROFILE_CATALOG' or row['usage_index'] not in bindings:
++            continue
++        slot = bindings[row['usage_index']]
++        profiles[slot] = row['selected_profile']
++        if slot >= len(types):
++            types.extend([None] * (slot + 1 - len(types)))
++        types[slot] = row['material']
++    if bindings:
++        configuration['filament_settings_id'] = profiles
++        if types:
++            configuration['filament_type'] = types
++    return configuration
++
++
+ def _apply(analysis, selections):
+     usage = analysis.get('material_usage') or []
+     if not usage:
+@@ -43,6 +99,7 @@
+     tolerance = max(Decimal('0.01'), Decimal('0.005') * (len(active) + 1))
+     if abs(consumed - total) > tolerance:
+         raise DomainError('MATERIAL_USAGE_MASS_MISMATCH', 422)
++    fresh = enrich_analysis(analysis)
+     selected_by_index = {}
+     for selected in selections:
+         index = selected.get('usage_index')
+@@ -58,18 +115,46 @@
+         if market.get('reference_material') is not None and market['reference_material'] != material:
+             raise DomainError('MATERIAL_PRICE_REFERENCE_MISMATCH', 422)
+         source = usage[index]
++        automatic = market.get('input_basis') == 'GCODE_PROFILE_CATALOG'
++        if automatic:
++            if material != str(source.get('material') or '').strip().upper():
++                raise DomainError('MATERIAL_PRICE_REFERENCE_MISMATCH', 422)
++            identity = fresh['material_usage'][index]['profile_identity']
++            if identity['match_status'] != 'matched':
++                raise DomainError('MATERIAL_PRICE_PROFILE_MISMATCH', 422)
++            from .pricing.material_catalog import resolve_price
++            # Resolve the identity proven against the complete source first;
++            # scoping raw rows before enrichment would discard sibling anchors.
++            expected = resolve_price(material, {**analysis, 'material_usage': [
++                {**source, 'sku_profile': identity['canonical_profile']}]})
++            if not expected.get('verified') or market.get('reference_price_id') != expected.get('price_id'):
++                raise DomainError('MATERIAL_PRICE_PROFILE_MISMATCH', 422)
++            market = {**market, **{key: expected[key] for key in (
++                'package_price', 'package_weight_g', 'inbound_shipping', 'tax_included', 'tax_rate',
++                'inbound_shipping_tax_included', 'inbound_shipping_tax_rate') if key in expected},
++                'reference_product': expected['product_name'],
++                'reference_profile': expected.get('reference_profile'),
++                'reference_url': expected.get('source_url'),
++                'reference_checked_date': expected.get('checked_date'),
++                'reference_basis': expected.get('reference_basis')}
+         product = market.get('reference_product') or market.get('product_name') or material
+         if not isinstance(product, str):
+             raise DomainError('INVALID_MATERIAL_USAGE_SELECTION', 422)
+-        profile = re.sub(r'\s+\d+(?:\.\d+)?\s*(?:kg|g)\s*$', '', product, flags=re.I)
++        profile = market.get('reference_profile') or re.sub(r'\s+\d+(?:\.\d+)?\s*(?:kg|g)\s*$', '', product, flags=re.I)
++        if not isinstance(profile, str) or len(profile) > 500:
++            raise DomainError('INVALID_MATERIAL_USAGE_SELECTION', 422)
++        if automatic:
++            profile = source.get('sku_profile')
+         selected_by_index[index] = {
+             **deepcopy(source), 'usage_index': index, 'material': material,
+             'grams': format(weights[index], 'f'), 'sku_profile': profile,
+             'selected_material': material, 'selected_product': product, 'selected_profile': profile,
+             'material_price': deepcopy(market), 'gcode_material': source.get('material'),
+             'gcode_sku_profile': source.get('sku_profile'),
++            'selection_basis': 'GCODE_PROFILE_CATALOG' if automatic else 'USER_SELECTED_MATERIAL',
+         }
+-        selected_by_index[index]['profile_identity'] = parse(profile, material)
++        if not automatic:
++            selected_by_index[index]['profile_identity'] = parse(profile, material)
+     if set(selected_by_index) != active or not active:
+         raise DomainError('MATERIAL_USAGE_SELECTION_REQUIRED', 422)
+     enriched = [selected_by_index[index] for index in sorted(active)]
+@@ -82,16 +167,30 @@
+     rewritten = deepcopy(usage)
+     for row in enriched:
+         index = row['usage_index']
+-        rewritten[index].update(material=row['material'], sku_profile=row['selected_profile'],
+-                                gcode_material=row['gcode_material'], gcode_sku_profile=row['gcode_sku_profile'])
++        if row['selection_basis'] != 'GCODE_PROFILE_CATALOG':
++            rewritten[index].update(material=row['material'], sku_profile=row['selected_profile'],
++                                    gcode_material=row['gcode_material'], gcode_sku_profile=row['gcode_sku_profile'])
+     updated['material_usage'] = rewritten
+     updated['detected_materials'] = list(dict.fromkeys(row['material'] for row in enriched))
+-    updated['configuration'] = {**(updated.get('configuration') or {}),
+-                                'filament_settings_id': [row['sku_profile'] for row in rewritten]}
++    modes = {row['selection_basis'] for row in enriched}
++    if modes != {'GCODE_PROFILE_CATALOG'}:
++        updated['configuration'] = _manual_configuration(analysis, fresh, enriched)
++    basis = ('GCODE_PROFILE_CATALOG' if modes == {'GCODE_PROFILE_CATALOG'} else
++             'USER_SELECTED_MATERIALS' if modes == {'USER_SELECTED_MATERIAL'} else
++             'MIXED_PROFILE_AND_USER_SELECTED_MATERIALS')
+     updated['material_selection'] = {
+-        'basis': 'USER_SELECTED_MATERIALS', 'scope': 'PER_FILAMENT_USAGE',
++        'basis': basis, 'scope': 'PER_FILAMENT_USAGE',
+         'selections': deepcopy(enriched), 'primary_usage_index': primary['usage_index'],
+         'gcode_detected_materials': deepcopy(analysis.get('detected_materials') or []),
+         'gcode_material_usage': deepcopy(usage),
+     }
+-    return enrich_analysis(updated), enriched, primary
++    updated = enrich_analysis(updated)
++    for row in enriched:
++        if row['selection_basis'] != 'GCODE_PROFILE_CATALOG':
++            continue
++        original_identity = fresh['material_usage'][row['usage_index']]['profile_identity']
++        updated_identity = updated['material_usage'][row['usage_index']]['profile_identity']
++        if (updated_identity['match_status'] != 'matched' or
++                updated_identity['canonical_profile'] != original_identity['canonical_profile']):
++            raise DomainError('MATERIAL_PRICE_PROFILE_MISMATCH', 422)
++    return updated, enriched, primary
+diff --git a/app/pricing/material_catalog.py b/app/pricing/material_catalog.py
+--- a/app/pricing/material_catalog.py
++++ b/app/pricing/material_catalog.py
+@@ -11,8 +11,19 @@
+ 
+ 
+ def public_prices(materials):
+-    rows=catalog()['materials']
+-    return {key:rows.get(key,{'verified':False,'reason_ko':'국내 공식 판매 가격 미확인'}) for key in materials}
++    data=catalog();rows=data['materials'];brand=data.get('generic_default_brand','eSUN')
++    result={}
++    for key in materials:
++        row=rows.get(key,{'verified':False,'reason_ko':'국내 공식 판매 가격 미확인'})
++        if row.get('verified') and row.get('reference_brand')==brand:
++            result[key]={**row,'reference_basis':'UNBRANDED_ESUN_RETAIL_REFERENCE',
++                'notes_ko':row.get('notes_ko','')+' 브랜드 미지정 소재의 eSUN 국내 판매 가격 참조입니다. 실제 출력 소재·제품·강도 식별을 변경하지 않습니다.'}
++        elif row.get('verified'):
++            result[key]={'verified':False,'package_price':None,'package_weight_g':None,
++                'inbound_shipping':None,'reason_ko':'브랜드 미지정 소재에 사용할 eSUN 국내 공식 판매 가격 미확인'}
++        else:
++            result[key]=dict(row)
++    return result
+ 
+ 
+ def profile_price_rules():
+@@ -25,7 +36,9 @@
+         price=rule.get('price')
+         if price is None and rule.get('price_material'):price=materials.get(rule['price_material'])
+         if price is None and rule.get('price_rule_id'):price=direct.get(rule['price_rule_id'])
+-        if price is not None:expanded.append({**rule,'price':dict(price)})
++        if price is not None:
++            expanded.append({**rule,'price':{**price,
++                'reference_basis':rule.get('reference_basis','EXACT_PRODUCT_PROFILE')}})
+     return expanded
+ 
+ 
+@@ -46,7 +59,7 @@
+         for rule in rules:
+             if rule['material']==material and re.fullmatch(rule['pattern'],generic_name):
+                 return rule['price']
+-    generic_names={material.lower(),f'generic {material.lower()}',f'qidi generic {material.lower()}'}
++    generic_names={material.lower(),f'generic {material.lower()}'}
+     if not names or all(name in generic_names for name in names):
+         return public_prices([material])[material]
+     return {'verified':False,'reason_ko':'감지된 브랜드·제품과 일치하는 가격 미확인'}
+diff --git a/app/pricing/material_prices.json b/app/pricing/material_prices.json
+--- a/app/pricing/material_prices.json
++++ b/app/pricing/material_prices.json
+@@ -1,6 +1,6 @@
+ {
+-  "revision": "DOMESTIC_OFFICIAL_RETAIL_20261001_SHIPPING_MIN_4000",
+-  "pricing_basis": "Published single-package retail reference; price selection never identifies the printed material. Inbound delivery uses a 4,000 KRW operating-policy floor per package unless the verified product explicitly has free shipping. Customer outbound shipping is separate and defaults to 4,000 KRW once per quote batch. Unverified price or VAT is not silently filled.",
++  "revision": "DOMESTIC_OFFICIAL_RETAIL_20261008_UNBRANDED_ESUN_SHIPPING_MIN_4000",
++  "pricing_basis": "Published single-package retail reference; price selection never identifies the printed material. Inbound delivery uses a 4,000 KRW operating-policy floor per package unless the verified product explicitly has free shipping. Customer outbound shipping is a separate optional input, applied once per quote batch when entered. Unverified price or VAT is not silently filled. Brand-unspecified materials use verified domestic eSUN price references only; explicit brands and products require an exact profile rule. QIDI Generic remains QIDI. Price references do not change material or strength identity. Existing procurement margin remains 2,000 KRW per retail package.",
+   "materials": {
+     "PLA": {
+       "verified": true,
+@@ -13,13 +13,15 @@
+       "inbound_shipping_tax_included": true,
+       "inbound_shipping_tax_rate": "0.1",
+       "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=285&item_code=P00000KZ000A",
+-      "checked_date": "2026-10-01",
++      "checked_date": "2026-10-08",
+       "notes_ko": "PLA+나 PLA-Basic로 대체하지 않고 일반 PLA 옵션 선택. 단품 배송 기준 3,000원, 10만원 이상 무료. 색상별 재고 확인 필요. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
+       "availability": "InStock (selected white option)",
+       "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
+       "price_id": "domestic-20261001-pla-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN PLA"
+     },
+     "PETG": {
+       "verified": true,
+@@ -32,17 +34,19 @@
+       "inbound_shipping_tax_included": true,
+       "inbound_shipping_tax_rate": "0.1",
+       "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=161&item_code=P00000GF000S",
+-      "checked_date": "2026-10-01",
++      "checked_date": "2026-10-08",
+       "notes_ko": "PETG+ 및 PETG+HS 19,800원, PETG-CF 24,200원은 별도 등급으로 제외. 단품 배송 기준 3,000원, 10만원 이상 무료. 색상별 재고 확인 필요. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
+       "availability": "InStock for gold and several transparent colors; standard black/white/red/grey/silver/clear/blue OutOfStock in source metadata",
+       "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
+       "price_id": "domestic-20261001-petg-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN PETG"
+     },
+     "ABS": {
+       "verified": true,
+-      "product_name": "eSUN 저수축ABS+ 필라멘트 ABS필라멘트 1Kg 1.75mm",
++      "product_name": "eSUN 일반 ABS 1kg (일반ABS 옵션)",
+       "package_price": "18700",
+       "package_weight_g": "1000",
+       "inbound_shipping": "4000",
+@@ -51,31 +55,36 @@
+       "inbound_shipping_tax_included": true,
+       "inbound_shipping_tax_rate": "0.1",
+       "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=171&item_code=P00000GP00CB",
+-      "checked_date": "2026-10-01",
+-      "notes_ko": "페이지 제목에는 ABS+가 있으나 실제 일반ABS 옵션 가격/재고를 별도로 확인. 단품 배송 기준 3,000원, 10만원 이상 무료. 색상별 재고 확인 필요. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
++      "checked_date": "2026-10-08",
++      "notes_ko": "상품 페이지 제목의 ABS+와 구분하여 종류=일반ABS, black 옵션(P00000GP00CB)의 18,700원·1kg·재고를 확인했습니다. ABS+로 치환하지 않습니다. 게시 단품 배송비는 3,000원이며 입고 배송비 운영 하한 4,000원을 적용합니다.",
+       "availability": "InStock for regular ABS black, white and clear; regular ABS cold white OutOfStock",
+       "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
+       "price_id": "domestic-20261001-abs-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN ABS"
+     },
+     "ASA": {
+       "verified": true,
+-      "product_name": "Bambu ASA 1kg (스풀 포함)",
+-      "package_price": "47000",
+-      "package_weight_g": "1000",
+-      "inbound_shipping": "4000",
+-      "tax_included": true,
+-      "tax_rate": "0.1",
+-      "inbound_shipping_tax_included": true,
+-      "inbound_shipping_tax_rate": "0.1",
+-      "source_url": "https://www.3dmon.co.kr/main/board.php?bo_table=shop&wr_id=362",
+-      "checked_date": "2026-10-01",
+-      "notes_ko": "국내 총판 부가세 포함 판매가, 단품 배송 3,000원. 색상별 재고 확인 필요. eSUN 일반 ASA 검증 가격이 없어 이 기준 상품 사용. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
+-      "availability": "option_check_required",
+-      "price_id": "domestic-20261001-asa-shipping4000",
+-      "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "product_name": "eSUN ASA+ 필라멘트 1kg",
++      "package_price": "24200",
++      "package_weight_g": "1000",
++      "inbound_shipping": "4000",
++      "tax_included": true,
++      "tax_rate": "0.1",
++      "inbound_shipping_tax_included": true,
++      "inbound_shipping_tax_rate": "0.1",
++      "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=327&item_code=P00000MP000D",
++      "checked_date": "2026-10-08",
++      "notes_ko": "일반 ASA와 ASA+의 제품 동일성을 추정하지 않습니다. 브랜드 미지정 ASA의 견적 가격 참조로만 사용하며 출력 소재·강도는 ASA로 유지합니다. 게시 단품 배송비 3,000원, 입고 배송비 운영 하한 4,000원 적용. 색상별 재고 확인 필요.",
++      "availability": "InStock grey; black/cold white OutOfStock",
++      "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
++      "price_id": "esun-domestic-20261008-asa-shipping4000",
++      "published_inbound_shipping": "3000",
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN ASA+"
+     },
+     "PC": {
+       "verified": true,
+@@ -88,17 +97,19 @@
+       "inbound_shipping_tax_included": true,
+       "inbound_shipping_tax_rate": "0.1",
+       "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=160&item_code=P00000GE000T",
+-      "checked_date": "2026-10-01",
++      "checked_date": "2026-10-08",
+       "notes_ko": "500g 포장당 부가비 2,000원 적용. PC-HT 1kg와 구분. 단품 배송 기준 3,000원, 10만원 이상 무료. 색상별 재고 확인 필요. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
+       "availability": "InStock clear; OutOfStock black",
+       "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
+       "price_id": "domestic-20261001-pc-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN PC"
+     },
+     "TPU": {
+       "verified": true,
+-      "product_name": "eSUN TPE TPU 플렉시블 eLastic, eFlex, eTPU-95A, 고속출력eTPU-HS 필라멘트 1.75mm 1kg",
++      "product_name": "eSUN TPU 95A 1kg (eTPU-95A 옵션)",
+       "package_price": "44000",
+       "package_weight_g": "1000",
+       "inbound_shipping": "4000",
+@@ -107,13 +118,15 @@
+       "inbound_shipping_tax_included": true,
+       "inbound_shipping_tax_rate": "0.1",
+       "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=181&item_code=P00000GZ000O",
+-      "checked_date": "2026-10-01",
++      "checked_date": "2026-10-08",
+       "notes_ko": "TPU 95A의 실제 옵션. TPE로 간주하지 않음. 단품 배송 기준 3,000원, 10만원 이상 무료. 색상별 재고 확인 필요. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
+       "availability": "InStock eTPU-95A black/clear/white/grey",
+       "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
+       "price_id": "domestic-20261001-tpu-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN TPU 95A"
+     },
+     "TPE": {
+       "verified": false,
+@@ -149,7 +162,9 @@
+       "unverified_reason": null,
+       "price_id": "domestic-20261001-pa6-cf-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "Bambu",
++      "reference_profile": "Bambu PA6-CF"
+     },
+     "PA6-GF": {
+       "verified": true,
+@@ -168,7 +183,9 @@
+       "unverified_reason": null,
+       "price_id": "domestic-20261001-pa6-gf-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "Bambu",
++      "reference_profile": "Bambu PA6-GF"
+     },
+     "PA12-CF": {
+       "verified": false,
+@@ -204,26 +221,30 @@
+       "unverified_reason": null,
+       "price_id": "domestic-20261001-pps-cf",
+       "published_inbound_shipping": "0",
+-      "shipping_policy": "VERIFIED_FREE"
++      "shipping_policy": "VERIFIED_FREE",
++      "reference_brand": "Bambu",
++      "reference_profile": "Bambu PPS-CF"
+     },
+     "PETG-CF": {
+       "verified": true,
+-      "product_name": "Bambu PETG-CF (스풀 포함 1kg)",
+-      "package_price": "55000",
+-      "package_weight_g": "1000",
+-      "inbound_shipping": "4000",
+-      "tax_included": true,
+-      "tax_rate": "0.1",
+-      "inbound_shipping_tax_included": true,
+-      "inbound_shipping_tax_rate": "0.1",
+-      "source_url": "https://www.3dmon.co.kr/main/board.php?bo_table=shop&wr_id=337",
+-      "checked_date": "2026-10-01",
+-      "notes_ko": "현재 HTTP 상품페이지 55,000원 (부가세 포함), 재고상태 옵션확인. 상품페이지 3,000원. 무료배송 주문금액 기준 미확인. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
+-      "availability": "option_check_required",
+-      "unverified_reason": null,
+-      "price_id": "domestic-20261001-petg-cf-shipping4000",
+-      "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "product_name": "eSUN PETG-CF 필라멘트 1kg",
++      "package_price": "24200",
++      "package_weight_g": "1000",
++      "inbound_shipping": "4000",
++      "tax_included": true,
++      "tax_rate": "0.1",
++      "inbound_shipping_tax_included": true,
++      "inbound_shipping_tax_rate": "0.1",
++      "source_url": "https://www.plabs.co.kr/product/detail.html?product_no=323&item_code=P00000ML000B",
++      "checked_date": "2026-10-08",
++      "notes_ko": "PETG, PETG+ 및 PETG+HS와 구분한 탄소섬유 PETG-CF 옵션의 국내 단품 가격입니다. 게시 단품 배송비 3,000원, 입고 배송비 운영 하한 4,000원 적용. 색상별 재고 확인 필요.",
++      "availability": "InStock Dark Grey; Black OutOfStock",
++      "official_status_source": "https://www.esun3d.com/ko/agent/page/3/",
++      "price_id": "esun-domestic-20261008-petg-cf-shipping4000",
++      "published_inbound_shipping": "3000",
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "eSUN",
++      "reference_profile": "eSUN PETG-CF"
+     },
+     "ABS-GF": {
+       "verified": true,
+@@ -242,7 +263,9 @@
+       "unverified_reason": null,
+       "price_id": "domestic-20261001-abs-gf-shipping4000",
+       "published_inbound_shipping": "3000",
+-      "shipping_policy": "MINIMUM_4000"
++      "shipping_policy": "MINIMUM_4000",
++      "reference_brand": "Bambu",
++      "reference_profile": "Bambu ABS-GF"
+     },
+     "PPA-CF": {
+       "verified": true,
+@@ -261,7 +284,9 @@
+       "unverified_reason": null,
+       "price_id": "domestic-20261001-ppa-cf",
+       "published_inbound_shipping": "0",
+-      "shipping_policy": "VERIFIED_FREE"
++      "shipping_policy": "VERIFIED_FREE",
++      "reference_brand": "Bambu",
++      "reference_profile": "Bambu PPA-CF"
+     },
+     "PETG-GF": {
+       "verified": false,
+@@ -356,14 +381,128 @@
+       }
+     },
+     {
+-      "material": "ABS",
+-      "pattern": "(?:generic abs|qidi generic abs|0\\.2 abs generic)",
+-      "price_rule_id": "fusrock-abs-user-20261001-shipping4000"
+-    },
+-    {
+       "material": "PA6-CF",
+       "pattern": "bambu(?: lab)? pa6-cf",
+       "price_material": "PA6-CF"
++    },
++    {
++      "material": "ASA",
++      "pattern": "bambu\\ asa",
++      "price": {
++        "verified": true,
++        "product_name": "Bambu ASA 1kg (스풀 포함)",
++        "package_price": "47000",
++        "package_weight_g": "1000",
++        "inbound_shipping": "4000",
++        "tax_included": true,
++        "tax_rate": "0.1",
++        "inbound_shipping_tax_included": true,
++        "inbound_shipping_tax_rate": "0.1",
++        "source_url": "https://www.3dmon.co.kr/main/board.php?bo_table=shop&wr_id=362",
++        "checked_date": "2026-10-01",
++        "notes_ko": "국내 총판 부가세 포함 판매가, 단품 배송 3,000원. 색상별 재고 확인 필요. eSUN 일반 ASA 검증 가격이 없어 이 기준 상품 사용. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
++        "availability": "option_check_required",
++        "price_id": "domestic-20261001-asa-shipping4000",
++        "published_inbound_shipping": "3000",
++        "shipping_policy": "MINIMUM_4000",
++        "reference_brand": "Bambu",
++        "reference_profile": "Bambu ASA"
++      }
++    },
++    {
++      "material": "PA6-GF",
++      "pattern": "bambu\\ pa6\\-gf",
++      "price_material": "PA6-GF"
++    },
++    {
++      "material": "PPS-CF",
++      "pattern": "bambu\\ pps\\-cf",
++      "price_material": "PPS-CF"
++    },
++    {
++      "material": "PETG-CF",
++      "pattern": "bambu\\ petg\\-cf",
++      "price": {
++        "verified": true,
++        "product_name": "Bambu PETG-CF (스풀 포함 1kg)",
++        "package_price": "55000",
++        "package_weight_g": "1000",
++        "inbound_shipping": "4000",
++        "tax_included": true,
++        "tax_rate": "0.1",
++        "inbound_shipping_tax_included": true,
++        "inbound_shipping_tax_rate": "0.1",
++        "source_url": "https://www.3dmon.co.kr/main/board.php?bo_table=shop&wr_id=337",
++        "checked_date": "2026-10-01",
++        "notes_ko": "현재 HTTP 상품페이지 55,000원 (부가세 포함), 재고상태 옵션확인. 상품페이지 3,000원. 무료배송 주문금액 기준 미확인. 가격정책상 기본 입고 배송비는 포장당 4,000원으로 적용.",
++        "availability": "option_check_required",
++        "unverified_reason": null,
++        "price_id": "domestic-20261001-petg-cf-shipping4000",
++        "published_inbound_shipping": "3000",
++        "shipping_policy": "MINIMUM_4000",
++        "reference_brand": "Bambu",
++        "reference_profile": "Bambu PETG-CF"
++      }
++    },
++    {
++      "material": "ABS-GF",
++      "pattern": "bambu\\ abs\\-gf",
++      "price_material": "ABS-GF"
++    },
++    {
++      "material": "PPA-CF",
++      "pattern": "bambu\\ ppa\\-cf",
++      "price_material": "PPA-CF"
++    },
++    {
++      "material": "PLA",
++      "pattern": "esun\\ pla",
++      "price_material": "PLA"
++    },
++    {
++      "material": "PETG",
++      "pattern": "esun\\ petg",
++      "price_material": "PETG"
++    },
++    {
++      "material": "ABS",
++      "pattern": "esun\\ abs",
++      "price_material": "ABS"
++    },
++    {
++      "material": "PC",
++      "pattern": "esun\\ pc",
++      "price_material": "PC"
++    },
++    {
++      "material": "PETG-CF",
++      "pattern": "esun\\ petg\\-cf",
++      "price_material": "PETG-CF"
++    },
++    {
++      "material": "PLA",
++      "pattern": "bambu pla basic",
++      "price": {
++        "verified": true,
++        "product_name": "Bambu PLA Basic 1kg (스풀 포함)",
++        "package_price": "22000",
++        "package_weight_g": "1000",
++        "inbound_shipping": "4000",
++        "tax_included": true,
++        "tax_rate": "0.1",
++        "inbound_shipping_tax_included": true,
++        "inbound_shipping_tax_rate": "0.1",
++        "source_url": "https://kr.store.bambulab.com/products/pla-basic-filament?id=565422966019776519",
++        "checked_date": "2026-10-08",
++        "notes_ko": "Bambu 한국 공식 스토어 PLA Basic 검정(10101), 스풀 포함 1kg의 단품 공시가 22,000원(VAT 포함). 리필 18,000원 및 10개 이상 번들 최저가는 적용하지 않습니다. G-code 제품명에는 포장 정보가 없어 스풀 포함 가격을 견적 기준으로 사용합니다. 입고 배송비는 운영 기준 4,000원이며 완성품 고객 발송비는 별도입니다.",
++        "availability": "InStock black with spool (SKU 565422966019776519)",
++        "price_id": "bambu-pla-basic-spool-1kg-20261008-shipping4000",
++        "published_inbound_shipping": null,
++        "shipping_policy": "OPERATING_REFERENCE_4000",
++        "reference_brand": "Bambu",
++        "reference_profile": "Bambu PLA Basic"
++      }
+     }
+-  ]
++  ],
++  "generic_default_brand": "eSUN"
+ }
+diff --git a/app/report_materials.py b/app/report_materials.py
+--- a/app/report_materials.py
++++ b/app/report_materials.py
+@@ -2,11 +2,12 @@
+ 
+ AGGREGATE_REVIEW_CODE='MULTIMATERIAL_TOTAL_MASS_MANUAL_PRICE'
+ AGGREGATE_REVIEW_MESSAGE='복수 소재 파일의 전체 사용량에 직접 선택한 제품 단가를 적용했습니다. 실제 출력 소재와 전체 중량 적용 여부를 확인하세요.'
++PER_FILAMENT_BASES=('USER_SELECTED_MATERIALS','GCODE_PROFILE_CATALOG','MIXED_PROFILE_AND_USER_SELECTED_MATERIALS')
+ 
+ 
+ def material_summary(result,fallback='—'):
+     selection=((result.get('detected_settings') or {}).get('material_selection') or {})
+-    if selection.get('basis')=='USER_SELECTED_MATERIALS':
++    if selection.get('basis') in PER_FILAMENT_BASES:
+         materials=list(dict.fromkeys(row['selected_material'] for row in selection.get('selections') or [] if row.get('selected_material')))
+         if materials:return ' / '.join(materials)
+     return fallback
+@@ -15,15 +16,16 @@
+ def selection_notes(result,grams):
+     selection=((result.get('detected_settings') or {}).get('material_selection') or {})
+     basis=selection.get('basis')
+-    if basis not in ('USER_SELECTED_MATERIAL','USER_SELECTED_MATERIALS'):
++    if basis not in ('USER_SELECTED_MATERIAL',*PER_FILAMENT_BASES):
+         return []
+-    if basis=='USER_SELECTED_MATERIALS':
+-        notes=['소재별 사용량에 각각 선택한 실제 제품의 단가를 적용했습니다.']
++    if basis in PER_FILAMENT_BASES:
++        notes=['소재별 사용량에 각각 적용된 제품·가격 기준으로 계산했습니다.']
+         for index,row in enumerate(selection.get('selections') or [],1):
+             product=row.get('selected_product') or row.get('selected_material') or '미확인'
+             usage_index=row.get('usage_index')
+             number=usage_index+1 if isinstance(usage_index,int) else index
+-            notes.append(f'필라멘트 {number} · 실제 사용 제품: {product} · 소재 {row.get("selected_material") or "미확인"} · 사용량 {row.get("grams") if row.get("grams") is not None else "?"}g.')
++            label='G-code 자동 적용 · 가격 기준' if row.get('selection_basis')=='GCODE_PROFILE_CATALOG' else '실제 사용 제품'
++            notes.append(f'필라멘트 {number} · {label}: {product} · 소재 {row.get("selected_material") or "미확인"} · 사용량 {row.get("grams") if row.get("grams") is not None else "?"}g.')
+     else:
+         product=selection.get('selected_product') or selection.get('selected_material') or '미확인'
+         notes=[f'실제 사용 제품 수동 선택: {product} · 소재 {selection.get("selected_material") or "미확인"}.']
+@@ -34,7 +36,7 @@
+     source=' · '.join(f'{row.get("material") or "미확인"} {row.get("grams") if row.get("grams") is not None else "?"}g' for row in usage)
+     if not source:source=', '.join(selection.get('gcode_detected_materials') or [])
+     if source:notes.append('원본 G-code 감지: '+source+'.')
+-    notes.append('소재·강도 참고는 사용자 선택 제품 기준입니다. 원 감지값은 분석 기록에 보존됩니다.')
++    notes.append('자동 가격 적용은 G-code의 소재·강도 식별값을 유지합니다. 직접 선택한 항목만 선택 제품을 소재·강도 참고에 반영합니다.' if basis in ('GCODE_PROFILE_CATALOG','MIXED_PROFILE_AND_USER_SELECTED_MATERIALS') else '소재·강도 참고는 사용자 선택 제품 기준입니다. 원 감지값은 분석 기록에 보존됩니다.')
+     return notes
+ def review_message(code):
+     return {
+diff --git a/app/report_pdf.py b/app/report_pdf.py
+--- a/app/report_pdf.py
++++ b/app/report_pdf.py
+@@ -38,14 +38,15 @@
+         p('관리자 전용 · 통합 금액 및 파일별 상세 분석·내부 계산 근거' if administrator else '고객 전달용 · 파일별 출력 조건과 금액을 합산한 견적',small)]
+     project=rows[0].get('project_name') or '프로젝트';code=rows[0].get('project_code') or ''
+     story.extend([p(f'프로젝트  {project}'+(f' · {code}' if code else ''),small),Spacer(1,18)])
+-    table_rows=[[p(value,small) for value in ('파일','소재 / 실제 선택 제품','시간·중량','공급가','VAT','배송','합계')]]
++    has_auto=any(((row.get('result_json') or {}).get('detected_settings') or {}).get('material_selection',{}).get('basis') in ('GCODE_PROFILE_CATALOG','MIXED_PROFILE_AND_USER_SELECTED_MATERIALS') for row in rows)
++    table_rows=[[p(value,small) for value in ('파일','소재 / 제품·가격 기준' if has_auto else '소재 / 실제 선택 제품','시간·중량','공급가','VAT','배송','합계')]]
+     material_notes=[];product_spans=[]
+     for index,row in enumerate(rows,1):
+         data=row['input_json'];result=row['result_json'];market=data.get('material_price') or {}
+         filename=row.get('original_filename') or f'파일 {index}'
+         product=market.get('reference_product') or data.get('material') or '—'
+         selection=((result.get('detected_settings') or {}).get('material_selection') or {})
+-        selected_usage=selection.get('selections') if selection.get('basis')=='USER_SELECTED_MATERIALS' else []
++        selected_usage=selection.get('selections') if selection.get('scope')=='PER_FILAMENT_USAGE' else []
+         material_text=f'{len(selected_usage)}개 필라멘트\n{material_summary(result,data.get("material","—"))}' if selected_usage else f"{data.get('material','—')}\n{product}"
+         duration=int(data.get('duration_seconds') or 0);time_text=f'{duration//3600}시간 {(duration%3600)//60}분'
+         table_rows.append([p(f'{index}. {filename}',small),p(material_text,small),
+@@ -151,7 +152,8 @@
+         materials=material_cost_rows(result)
+         usage=detected.get('material_usage') or []
+         if materials:
+-            material_rows=[[p('소재',cell),p('실제 선택 제품',cell),p('사용량',cell),p('소재비 (VAT 별도)',cell)]]
++            auto_prices=(detected.get('material_selection') or {}).get('basis') in ('GCODE_PROFILE_CATALOG','MIXED_PROFILE_AND_USER_SELECTED_MATERIALS')
++            material_rows=[[p('소재',cell),p('제품·가격 기준' if auto_prices else '실제 선택 제품',cell),p('사용량',cell),p('소재비 (VAT 별도)',cell)]]
+             material_style=[('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eaf3f0')),
+                 ('LINEBELOW',(0,0),(-1,-1),.35,colors.HexColor('#dfe8e3')),
+                 ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]
+diff --git a/app/strength_reference.py b/app/strength_reference.py
+--- a/app/strength_reference.py
++++ b/app/strength_reference.py
+@@ -26,22 +26,33 @@
+         report['limitations'].append('제조사 소재 참고값에는 보정계수를 적용하지 않습니다. 내부 여유계수는 출력물 예상 강도·하중 계산에만 적용하며 실측 보정계수나 검증된 안전율은 아닙니다.')
+     report['material_reference_scope']=scope
+     selection=analysis.get('material_selection') or {}
++    identity_basis=selection.get('basis')
++    model_modes=set()
++    if identity_basis in ('GCODE_PROFILE_CATALOG','MIXED_PROFILE_AND_USER_SELECTED_MATERIALS'):
++        indices=set(scope.get('usage_indices') or [])
++        model_modes={row.get('selection_basis') for row in selection.get('selections') or []
++                     if row.get('usage_index') in indices}
++        if model_modes=={'GCODE_PROFILE_CATALOG'}:identity_basis='GCODE_PROFILE_METADATA'
++        elif model_modes=={'USER_SELECTED_MATERIAL'}:identity_basis='USER_SELECTED_MATERIALS'
+     report['material_identity_basis']=('ORIGINAL_GCODE_PROFILE_METADATA_ONLY' if selection.get('aggregate_price_override') else
+-        selection.get('basis') or 'GCODE_PROFILE_METADATA')
++        identity_basis or 'GCODE_PROFILE_METADATA')
+     if selection.get('aggregate_price_override') and report.get('reference_product'):
+         report['source_reference_kind']=report.get('reference_kind')
+         report['reference_kind']='ORIGINAL_GCODE_REFERENCE_ONLY_PRICE_SELECTION_UNRESOLVED'
+         report['limitations'].insert(0,'보존된 원본 G-code 모델 프로파일의 비교용 소재 참고값입니다. 전체 사용량의 단가 선택은 현재 실제 모델 소재를 확인하지 못하므로 선택 제품의 강도값으로 적용하지 않습니다.')
+-    if not selection.get('aggregate_price_override') and selection.get('basis') in ('USER_SELECTED_MATERIAL','USER_SELECTED_MATERIALS'):
++    if not selection.get('aggregate_price_override') and (identity_basis in ('USER_SELECTED_MATERIAL','USER_SELECTED_MATERIALS') or 'USER_SELECTED_MATERIAL' in model_modes):
+         selected_kinds={'SLICER_PROFILE_REFERENCE_NOT_VERIFIED_SPOOL':'USER_SELECTED_PRODUCT_REFERENCE_NOT_VERIFIED_SPOOL',
+             'OFFICIAL_EXACT_PRODUCT_PROFILE':'OFFICIAL_EXACT_USER_SELECTED_PRODUCT',
+             'OFFICIAL_EXACT_PRODUCT_PROPERTIES_NO_DIRECTIONAL_PAIR':'OFFICIAL_EXACT_USER_SELECTED_PRODUCT_PROPERTIES_NO_DIRECTIONAL_PAIR'}
+         kind=report.get('reference_kind')
++        mixed_model='GCODE_PROFILE_CATALOG' in model_modes
+         if kind in selected_kinds:
+             report['reference_kind']=selected_kinds[kind]
+-            report['limitations'][0]='사용자가 선택한 제품 프로파일을 소재 참고자료와 연결했습니다. 원본 G-code가 해당 제품을 식별하거나 실제 장착 스풀을 물리적으로 인증한 것은 아닙니다.'
++            report['limitations'][0]=('원본 G-code 프로파일과 사용자가 선택한 제품 프로파일을 함께 소재 참고자료와 연결했습니다. 선택 제품의 실제 장착 스풀을 물리적으로 인증한 것은 아닙니다.' if mixed_model else
++                '사용자가 선택한 제품 프로파일을 소재 참고자료와 연결했습니다. 원본 G-code가 해당 제품을 식별하거나 실제 장착 스풀을 물리적으로 인증한 것은 아닙니다.')
+         elif kind=='MATERIAL_FAMILY_PROXY_NOT_EXACT_SKU':
+-            report['limitations'][0]=f"사용자가 선택한 제품에 정확히 일치하는 방향별 참고자료가 없어 {report.get('reference_product')}를 동계열의 비교용 대체 참고값으로만 표시합니다. 선택 제품 자체의 강도나 실제 장착 스풀을 검증한 값은 아닙니다."
++            subject='원본 G-code와 사용자가 선택한 제품 프로파일' if mixed_model else '사용자가 선택한 제품'
++            report['limitations'][0]=f"{subject}에 정확히 일치하는 방향별 참고자료가 없어 {report.get('reference_product')}를 동계열의 비교용 대체 참고값으로만 표시합니다. 선택 제품 자체의 강도나 실제 장착 스풀을 검증한 값은 아닙니다."
+     report.setdefault('stress_area_basis','UNKNOWN')
+     cfg=analysis.get('configuration') or {};materials=analysis.get('detected_materials') or []
+     density=cfg.get('sparse_infill_density')
+diff --git a/app/web/app.js b/app/web/app.js
+--- a/app/web/app.js
++++ b/app/web/app.js
+@@ -281,7 +281,7 @@
+ 
+   function currentProfileIdentity(row,result) {
+     const identity=row?.profile_identity;
+-    if(!identity||identity.version!==1||identity.raw_profile!==String(row.sku_profile??'')||identity.material_hint!==(row.material??null))return null;
++    if(!identity||![1,2].includes(identity.version)||identity.raw_profile!==String(row.sku_profile??'')||identity.material_hint!==(row.material??null))return null;
+     if(identity.profile_source==='CONFIGURATION_TOOL_SLOT'&&!configurationProfileBindingFresh(result,row,identity))return null;
+     if(identity.profile_source==='MATERIAL_FAMILY_ONLY'){
+       const configured=result?.configuration?.filament_settings_id;
+@@ -317,7 +317,7 @@
+     }
+     state.materialPriceKey=key;
+     const draft=state.materialPriceDrafts[key];
+-    const generic=!profiles.length||profiles.every(name=>name===`generic ${material.toLowerCase()}`||name===`qidi generic ${material.toLowerCase()}`||name===material.toLowerCase());
++    const generic=!profiles.length||profiles.every(name=>name===`generic ${material.toLowerCase()}`||name===material.toLowerCase());
+     const rule=(state.config?.profile_price_rules||[]).find(row=>row.material===material&&profiles.length&&profiles.every(name=>new RegExp(`^(?:${row.pattern})$`,'i').test(name)));
+     const row=rule?.price||(generic?state.config?.material_prices?.[material]:null);
+     const verified=row?.verified===true;
+@@ -584,24 +584,70 @@
+ 
+   function batchUsageSelectedPrice(item,entry) {
+     const key=item.materialPriceSelections?.[entry.usage_index];
+-    return batchPriceOptions().find(option=>option.key===key)||null;
++    const selected=batchPriceOptions().find(option=>option.key===key);
++    return selected?{...selected,manual:item.materialPriceSelectionAuto?.[entry.usage_index]!==key}:null;
++  }
++
++  function materialUsageSlotKey(row,result) {
++    const rows=result?.material_usage||[];
++    if(Number.isInteger(row.tool_id)&&row.tool_id>=0&&rows.filter(candidate=>candidate.tool_id===row.tool_id).length===1)return `tool:${row.tool_id}`;
++    const signature=candidate=>JSON.stringify([candidate.tool_id??null,candidate.material??null,candidate.sku_profile??null,
++      candidate.color??null,candidate.used_for_object??null,candidate.used_for_support??null]);
++    const key=signature(row);
++    return rows.filter(candidate=>signature(candidate)===key).length===1?key:null;
++  }
++
++  function initializeMaterialPriceSelections(item,result) {
++    const entries=batchUsageRows(result),previous=item.materialPriceSelections||{},previousSlots=item.materialPriceSelectionSlots;
++    const previousAuto=item.materialPriceSelectionAuto||{},previousRows=item.materialPriceSelectionRows||{};
++    const sourceKey=JSON.stringify([result?.material_usage,result?.configuration?.filament_settings_id,
++      result?.configuration?.filament_type,result?.tool_ids,result?.detected_materials]);
++    const selectionKey=JSON.stringify(previous),autoKey=JSON.stringify(previousAuto),cached=item.materialPriceInitialization;
++    if(cached&&cached.config===state.config&&cached.sourceKey===sourceKey&&cached.selectionKey===selectionKey&&cached.autoKey===autoKey
++      &&entries.every(({row,usage_index})=>previousRows[usage_index]===row))return {filled:0,changed:false};
++    const selections={},slots={},automatic={},rows={};let filled=0;
++    entries.forEach(({row,usage_index})=>{
++      const slot=materialUsageSlotKey(row,result);
++      const previousIndex=previousSlots?Object.keys(previousSlots).find(index=>slot?previousSlots[index]===slot:previousRows[index]===row):String(usage_index);
++      const hasPrevious=previousIndex!==undefined&&Object.prototype.hasOwnProperty.call(previous,previousIndex);
++      const wasAutomatic=hasPrevious&&previousAuto[previousIndex]===previous[previousIndex];
++      if(hasPrevious&&!wasAutomatic)selections[usage_index]=previous[previousIndex];
++      else{
++        const price=batchCatalogPrice(result,row.material||'',[row]);
++        if(price){
++          const key=batchPriceKey(row.material,price);
++          selections[usage_index]=key;automatic[usage_index]=key;
++          if(!hasPrevious||previous[previousIndex]!==key)filled++;
++        }
++      }
++      slots[usage_index]=slot;rows[usage_index]=row;
++    });
++    const changed=JSON.stringify(previous)!==JSON.stringify(selections);
++    item.materialPriceSelections=selections;item.materialPriceSelectionSlots=slots;
++    item.materialPriceSelectionAuto=automatic;item.materialPriceSelectionRows=rows;
++    item.materialPriceInitialization={config:state.config,sourceKey,selectionKey:JSON.stringify(selections),autoKey:JSON.stringify(automatic)};
++    if(changed)item.estimate=null;
++    return {filled,changed};
+   }
+ 
+   function batchMaterialSelections(item,result) {
++    initializeMaterialPriceSelections(item,result);
+     return batchUsageRows(result).map(entry=>{
+       const option=batchUsageSelectedPrice(item,entry);
+       return option?{usage_index:entry.usage_index,material:option.material,
+-        material_price:batchMaterialPrice(option.price,option.material,'USER_SELECTED_MATERIAL')}:null;
++        material_price:batchMaterialPrice(option.price,option.material,option.manual?'USER_SELECTED_MATERIAL':'GCODE_PROFILE_CATALOG')}:null;
+     }).filter(Boolean);
+   }
+ 
+   function batchPrimaryPrice(item,result) {
++    initializeMaterialPriceSelections(item,result);
+     const rows=batchUsageRows(result),modelRows=rows.filter(({row})=>!(row.used_for_support===true&&row.used_for_object===false));
+     const primary=[...(modelRows.length?modelRows:rows)].sort((a,b)=>Number(b.row.grams)-Number(a.row.grams))[0];
+     return primary?batchUsageSelectedPrice(item,primary):null;
+   }
+ 
+   function renderMaterialChoices(container,item,result,onChange) {
++    initializeMaterialPriceSelections(item,result);
+     const entries=batchUsageRows(result),options=batchPriceOptions();
+     const many=entries.length>=4;
+     const group=document.createElement(many?'details':'div');group.className=`material-usage-group${many?' compact':''}`;
+@@ -622,9 +668,10 @@
+       const select=document.createElement('select');select.id=id;select.disabled=batchActiveStatuses.has(item.status);
+       select.append(new Option('실제 사용 제품 선택',''));options.forEach(option=>select.append(new Option(option.label,option.key)));
+       select.value=selected?.key||'';
+-      const note=document.createElement('small');note.textContent=selected?`적용: ${selected.price.product_name} · ${row.grams??'?'}g 별도 계산`:`G-code 프로필: ${row.sku_profile||row.material||'미확인'}`;
++      const note=document.createElement('small');note.textContent=selected?`${selected.manual?'수동 적용:':'G-code 자동 · 가격 기준:'} ${selected.price.product_name} · ${row.grams??'?'}g 별도 계산`:`G-code 프로필: ${row.sku_profile||row.material||'미확인'}`;
+       select.addEventListener('change',()=>{
+-        item.materialPriceSelections={...item.materialPriceSelections,[usage_index]:select.value};item.estimate=null;onChange();
++        item.materialPriceSelections={...item.materialPriceSelections,[usage_index]:select.value};
++        delete item.materialPriceSelectionAuto[usage_index];item.estimate=null;onChange();
+       });
+       choice.append(label,select,note);list.append(choice);
+     });
+@@ -644,6 +691,8 @@
+       invalidateStrengthMaterialSelection();
+       renderSingleMaterialChoices();
+     });
++    const primary=batchPrimaryPrice(state.singleMaterialChoice,result);
++    if(primary&&$('#material').value!==primary.material){$('#material').value=primary.material;applyMaterialPrice();}
+   }
+ 
+   function renderBatchFileRow(row,item) {
+@@ -709,6 +758,7 @@
+   function renderBatchPanel() {
+     const projectId=state.project?.id;
+     const items=state.batchItems.filter(item=>item.projectId===projectId);
++    items.forEach(item=>{if(item.analysis&&batchUsesPerMaterial(item.analysis))initializeMaterialPriceSelections(item,item.analysis);});
+     const panel=$('#batch-panel');
+     panel.hidden=!items.length||!projectId;
+     if(panel.hidden)return;
+@@ -763,12 +813,8 @@
+     items.forEach(item=>{
+       let changed=false;
+       if(batchUsesPerMaterial(item.analysis)){
+-        batchUsageRows(item.analysis).forEach(entry=>{
+-          if(batchUsageSelectedPrice(item,entry))return;
+-          const price=batchCatalogPrice(item.analysis,entry.row.material||'',[entry.row]);
+-          if(!price)return;
+-          item.materialPriceSelections={...item.materialPriceSelections,[entry.usage_index]:batchPriceKey(entry.row.material,price)};filled++;changed=true;
+-        });
++        const initialized=initializeMaterialPriceSelections(item,item.analysis);
++        filled+=initialized.filled;changed=initialized.changed;
+       }else if(!batchSelectedPrice(item,item.analysis)){
+         const material=(item.analysis.detected_materials||[])[0];
+         const price=material?batchCatalogPrice(item.analysis,material):null;
+@@ -790,9 +836,22 @@
+     if(!batchUsesPerMaterial(analysis))return true;
+     const selection=estimate?.result?.detected_settings?.material_selection;
+     const rows=batchUsageRows(analysis),saved=selection?.selections||[];
+-    return selection?.basis==='USER_SELECTED_MATERIALS'&&selection.scope==='PER_FILAMENT_USAGE'&&rows.length===saved.length
++    return ['USER_SELECTED_MATERIALS','GCODE_PROFILE_CATALOG','MIXED_PROFILE_AND_USER_SELECTED_MATERIALS'].includes(selection?.basis)&&selection.scope==='PER_FILAMENT_USAGE'&&rows.length===saved.length
+       &&rows.every(({row,usage_index})=>saved.some(entry=>entry.usage_index===usage_index
+-        &&Number(entry.grams)===Number(row.grams)&&entry.gcode_material===row.material));
++        &&Number(entry.grams)===Number(row.grams)&&entry.gcode_material===row.material
++        &&(entry.gcode_sku_profile??null)===(row.sku_profile??null)));
++  }
++
++  function restoredMaterialSelectionPricesMatch(estimate,item,analysis) {
++    initializeMaterialPriceSelections(item,analysis);
++    const rows=batchUsageRows(analysis),saved=estimate?.input?.material_selections||[];
++    return rows.length===saved.length&&rows.every(entry=>{
++      const matches=saved.filter(selection=>selection.usage_index===entry.usage_index);
++      if(matches.length!==1)return false;
++      const current=batchUsageSelectedPrice(item,entry),selected=matches[0],market=selected.material_price||{};
++      return current&&market.reference_price_id&&current.material===selected.material&&current.price.price_id===market.reference_price_id
++        &&current.manual!==(market.input_basis==='GCODE_PROFILE_CATALOG');
++    });
+   }
+ 
+   function batchPriceOptions() {
+@@ -818,7 +877,7 @@
+ 
+   function batchCatalogPrice(result,material,usageRows=null) {
+     const profiles=batchProfiles(result,usageRows);
+-    const generic=!profiles.length||profiles.every(name=>name===`generic ${material.toLowerCase()}`||name===`qidi generic ${material.toLowerCase()}`||name===material.toLowerCase());
++    const generic=!profiles.length||profiles.every(name=>name===`generic ${material.toLowerCase()}`||name===material.toLowerCase());
+     const rule=(state.config?.profile_price_rules||[]).find(row=>{
+       if(row.material!==material)return false;
+       const candidates=profiles.length?profiles:[`generic ${material.toLowerCase()}`];
+@@ -851,6 +910,7 @@
+     if(!Array.isArray(result.dimensions_mm)||result.dimensions_mm.some(value=>!(Number(value)>0)))return '완성 크기를 자동 확인하지 못했습니다.';
+     const materials=result.detected_materials||[];
+     if(batchUsesPerMaterial(result)){
++      initializeMaterialPriceSelections(item,result);
+       const rows=batchUsageRows(result);
+       if(!rows.length||rows.some(({row})=>row.grams==null||!Number.isFinite(Number(row.grams))||Number(row.grams)<=0))return '복수 소재의 소재별 중량을 확인할 수 없습니다. G-code 분석 내역을 검토하세요.';
+       const sum=rows.reduce((total,{row})=>total+Number(row.grams),0),tolerance=Math.max(.01,.005*(rows.length+1));
+@@ -866,7 +926,7 @@
+ 
+   function batchMaterialPrice(row,material,basis=null) {
+     return {input_basis:basis||row.source_kind||'OFFICIAL_DOMESTIC_CATALOG',reference_material:material,
+-      reference_price_id:row.price_id||null,reference_product:row.product_name||null,reference_url:row.source_url||null,
++      reference_price_id:row.price_id||null,reference_product:row.product_name||null,reference_profile:row.reference_profile||null,reference_url:row.source_url||null,
+       reference_checked_date:row.checked_date||null,package_price:String(row.package_price),package_weight_g:String(row.package_weight_g),
+       inbound_shipping:String(row.inbound_shipping||0),inbound_shipping_tax_included:row.inbound_shipping_tax_included!==false,
+       inbound_shipping_tax_rate:String(row.inbound_shipping_tax_rate??'0.1'),tax_included:row.tax_included!==false,tax_rate:String(row.tax_rate??'0.1')};
+@@ -888,7 +948,7 @@
+     return {...payload,project_id:item.projectId,printer:result.printer,material,duration_seconds:Number(result.duration_seconds),
+       grams:String(result.grams),dimensions_mm:result.dimensions_mm.map(String),colors:Number(result.normal_output_color_count||1),
+       full_spectrum:result.full_spectrum_detected===true,fs_changes:result.full_spectrum_detected===true?Number(result.full_spectrum_change_count??result.toolchanges??0):0,
+-      part_count:Number(result.object_count||1),material_price:batchMaterialPrice(price,material,selection.manual?'USER_SELECTED_MATERIAL':null),material_selections:perMaterial?batchMaterialSelections(item,result):[],energy_kwh:null,
++      part_count:Number(result.object_count||1),material_price:batchMaterialPrice(price,material,selection.manual?'USER_SELECTED_MATERIAL':perMaterial?'GCODE_PROFILE_CATALOG':null),material_selections:perMaterial?batchMaterialSelections(item,result):[],energy_kwh:null,
+       source_file_version_id:item.fileVersionId,selected_plate_member:null,input_source:'GCODE',load_case:null,process_settings:batchProcessSettings(result)};
+   }
+ 
+@@ -1439,11 +1499,15 @@
+           if(!replacement&&selectionMatches&&batchUsesPerMaterial(item.analysis)){
+             for(const entry of estimate?.input?.material_selections||[]){
+               const option=batchPriceOptions().find(candidate=>candidate.material===entry.material&&candidate.price.price_id===entry.material_price?.reference_price_id);
+-              if(option)item.materialPriceSelections={...item.materialPriceSelections,[entry.usage_index]:option.key};
++              if(option){
++                item.materialPriceSelections={...item.materialPriceSelections,[entry.usage_index]:option.key};
++                if(entry.material_price?.input_basis==='GCODE_PROFILE_CATALOG')item.materialPriceSelectionAuto={...item.materialPriceSelectionAuto,[entry.usage_index]:option.key};
++              }
+             }
+           }
+           if(!replacement&&savedOption&&selectionMatches){item.selectedPriceKey=savedOption.key;item.userSelectedMaterial=savedMarket.input_basis==='USER_SELECTED_MATERIAL';}
+           const currentQuote=!replacement&&selectionMatches&&restoredEstimateMatchesPricing(estimate,state.effectivePolicyRevision,savedOption?.price?.price_id)
++            &&(!batchUsesPerMaterial(item.analysis)||restoredMaterialSelectionPricesMatch(estimate,item,item.analysis))
+             &&!batchReadiness(item,item.analysis);
+           if(currentQuote){item.status='QUOTED';item.estimate=estimate;item.message='저장된 파일별 견적을 복원했습니다.';}
+           else {const reason=batchReadiness(item,item.analysis);item.status=reason?'REVIEW':'READY';item.message=reason||(estimate?'가격 또는 배송 정책이 갱신되어 새 견적이 필요합니다.':'분석 완료 · 일괄 견적 가능');}
+@@ -1666,7 +1730,10 @@
+ 
+   function strengthMaterialKey(input) {
+     const selections=input.material_selections||[];
+-    if(selections.length)return JSON.stringify(selections.map(row=>[Number(row.usage_index),row.material,row.material_price?.reference_price_id||row.material_price?.reference_product||'']).sort((a,b)=>a[0]-b[0]));
++    if(selections.length)return JSON.stringify(selections.map(row=>[Number(row.usage_index),row.material,
++      row.material_price?.reference_price_id||row.material_price?.reference_product||'',
++      row.material_price?.input_basis==='GCODE_PROFILE_CATALOG'?'GCODE_PROFILE_CATALOG':'USER_SELECTED_MATERIAL',
++      row.material_price?.reference_profile||null]).sort((a,b)=>a[0]-b[0]));
+     return JSON.stringify([input.material||'']);
+   }
+   function currentStrengthIdentity() {
+@@ -1959,7 +2026,7 @@
+     if(includeMaterialSelections&&state.inputSource==='GCODE'&&batchUsesPerMaterial(state.materialPriceAnalysis)){
+       const primary=batchPrimaryPrice(state.singleMaterialChoice,state.materialPriceAnalysis);
+       payload.material_selections=batchMaterialSelections(state.singleMaterialChoice,state.materialPriceAnalysis);
+-      if(primary){payload.material=primary.material;payload.material_price=batchMaterialPrice(primary.price,primary.material,'USER_SELECTED_MATERIAL');}
++      if(primary){payload.material=primary.material;payload.material_price=batchMaterialPrice(primary.price,primary.material,primary.manual?'USER_SELECTED_MATERIAL':'GCODE_PROFILE_CATALOG');}
+     }
+     return payload;
+   }
+diff --git a/app/web/index.html b/app/web/index.html
+--- a/app/web/index.html
++++ b/app/web/index.html
+@@ -16,7 +16,7 @@
+   <link rel="stylesheet" href="/web/styles.css?v=20261008-ipas">
+   <script defer src="/web/load-case.js?v=20261003-profile-match"></script>
+   <script defer src="/web/gcode-viewer.js?v=20261007-commercial-quality"></script>
+-  <script defer src="/web/app.js?v=20261008-ipas"></script>
++  <script defer src="/web/app.js?v=20261008-profile-autoselect"></script>
+ </head>
+ <body>
+   <a class="skip-link" href="#calculator">계산기로 바로가기</a>

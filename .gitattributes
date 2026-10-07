@@ -1,0 +1,2 @@
+# Release patches preserve source line endings for exact hash reconstruction.
+docs/patches/ipas-profile-autoselect-20261008*.patch -text
