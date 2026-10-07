@@ -1,14 +1,18 @@
-# Print Quote Engine
+# IPAS-QUOTE ENGINE
+
+![IPAS · Integrated Printing Analysis System](branding/ipas/ipas-logo.svg)
 
 [한국어](#한국어) · [English](#english)
 
 ## 한국어
 
+**IPAS-QUOTE ENGINE**은 **IPAS / Integrated Printing Analysis System**의 견적 계산 엔진이다. 통합 시스템은 [IPAS-STRENGTH ENGINE](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE), [IPAS-GCODE ENGINE](https://github.com/mk0000001/IPAS-GCODE-ENGINE), [IPAS-QUOTE ENGINE](https://github.com/mk0000001/IPAS-QUOTE-ENGINE)을 연결한다. Python 패키지 이름 `print_quote_engine`은 기존 연동 호환성을 위해 유지한다.
+
 릴리스 **v0.13.0** · 코드 개정 13회(최초 등록 이후 업데이트 12회). [커밋 집계](VERSION_HISTORY.json).
 
 엔진 패키지를 변경한 도달 가능한 비병합 커밋 기준이다. 병합된 개발 이력은 포함하고 문서 전용·시험 전용·호스트 앱 변경과 자동 생성 `_version.py`는 제외한다. 개정 수는 기능 수나 정확도 검증 횟수가 아니다. 버전은 `0.<코드 개정 수>.<릴리스 메타데이터 수정>`이며 과거 결과에 버전이 없으면 미상으로 남긴다.
 
-PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, policy)`에 호스트가 입력과 요금 정책을 전달한다. 공개 저장소에는 운영 요율·고객 데이터·서버 설정·접속정보가 없다. 정책 검증과 이식 가능한 예제 fixture는 계속 개발 중이다.
+IPAS의 Decimal 기반 견적 계산기다. `calculate(input, policy)`에 호스트가 입력과 요금 정책을 전달한다. 공개 저장소에는 운영 요율·고객 데이터·서버 설정·접속정보가 없다. 정책 검증과 이식 가능한 예제 fixture는 계속 개발 중이다.
 
 [필라멘트별 견적·베드 옵션](docs/per-material-pricing.md): 각 실제 제품의 사용량과 원가를 따로 계산하고 베드 준비 옵션의 중복 요금을 막습니다.
 
@@ -30,11 +34,13 @@ PrintOps에서 분리한 Decimal 기반 견적 계산기다. `calculate(input, p
 python -m unittest discover -s tests
 ```
 
-관련 자료: [시스템 검증 범위](https://github.com/mk0000001/print-strength-engine/blob/master/docs/system-validation.md).
+관련 자료: [시스템 검증 범위](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE/blob/master/docs/system-validation.md).
 
 ---
 
 ## English
+
+**IPAS-QUOTE ENGINE** is the quote calculation engine of **IPAS / Integrated Printing Analysis System**. The integrated system connects [IPAS-STRENGTH ENGINE](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE), [IPAS-GCODE ENGINE](https://github.com/mk0000001/IPAS-GCODE-ENGINE), and [IPAS-QUOTE ENGINE](https://github.com/mk0000001/IPAS-QUOTE-ENGINE). The Python package name `print_quote_engine` is retained for compatibility with existing integrations.
 
 Release: **v0.13.0** · 13 recorded code revisions (12 updates after initial import). [Commit ledger](VERSION_HISTORY.json).
 
@@ -53,7 +59,7 @@ Run portable tests with `python -m unittest discover -s tests`.
 
 Optional quote inputs: `discount_percent` (decimal string, 0–100) and `discount_reason` (required for a positive discount, max 500 characters). Discounts apply to the final service subtotal and shipping; each is rounded to 1 KRW using half-up, and VAT is then recomputed with the supplied tax policy. The returned `discount` breakdown preserves original subtotal/VAT/shipping/total, reductions, percentage, reason, and rounding basis. Applying a new percentage recalculates from the undiscounted inputs rather than compounding the previous discount.
 
-Standalone Decimal-based quote calculation. Call calculate(input, policy). The host supplies its policy; this repository contains no production rates, customer data, server configuration, or credentials. Extracted from PrintOps. Policy validation and portable example fixtures are still being developed.
+Standalone Decimal-based quote calculation for IPAS. Call calculate(input, policy). The host supplies its policy; this repository contains no production rates, customer data, server configuration, or credentials. Policy validation and portable example fixtures are still being developed.
 
 The optional `DOMESTIC_LANDED_COST_PLUS_MARGIN_V1` policy removes included purchase and inbound-delivery VAT independently, normalizes the host-supplied package add-on using optional `margin_tax_included`/`margin_tax_rate` fields (missing fields preserve the prior pre-tax margin) and adds it, and allocates the sum by consumed grams/package weight. Customer delivery is separate. Missing method preserves historical markup snapshots; the new method never stacks the old multiplier. See [domestic retail references](docs/domestic-retail-references-20261001.md).
 
