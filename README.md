@@ -9,7 +9,9 @@
 
 ## 한국어
 
-최신 호스트 릴리스: [IPAS v0.5.26 프로필 자동 선택·가격 근거 보존](docs/ipas-profile-autoselect-20261008.md). 수치 엔진은 G-code v0.28.0·strength v0.24.0·quote v0.13.0을 유지합니다.
+최신 호스트 릴리스: [IPAS v0.5.27 예상 하중 기준 단면·전달 검증](docs/ipas-reference-capacity-20261008.md). 얇은 부위가 없어도 지원되는 기준 단면의 하중을 표시하고 동일 제품의 다색 툴을 명시한 접합 가정 아래 계산합니다. G-code v0.28.0·strength v0.25.0·quote v0.13.0이며 가격 정책은 유지합니다. 검증 범위와 보류 사유는 릴리스 문서에 기록합니다.
+
+이전 호스트 릴리스: [IPAS v0.5.26 프로필 자동 선택·가격 근거 보존](docs/ipas-profile-autoselect-20261008.md).
 
 **IPAS-QUOTE ENGINE**은 **IPAS / Integrated Printing Analysis System**의 견적 계산 엔진이다. 통합 시스템은 [IPAS-STRENGTH ENGINE](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE), [IPAS-GCODE ENGINE](https://github.com/mk0000001/IPAS-GCODE-ENGINE), [IPAS-QUOTE ENGINE](https://github.com/mk0000001/IPAS-QUOTE-ENGINE)을 연결한다. Python 패키지 이름 `print_quote_engine`은 기존 연동 호환성을 위해 유지한다.
 
@@ -45,7 +47,9 @@ python -m unittest discover -s tests
 
 ## English
 
-Latest host release: [IPAS v0.5.26 profile auto-selection and price provenance](docs/ipas-profile-autoselect-20261008.md). Numerical engines remain G-code v0.28.0, strength v0.24.0 and quote v0.13.0.
+Latest host release: [IPAS v0.5.27 reference-section load delivery](docs/ipas-reference-capacity-20261008.md). Supported section estimates remain available without thin-region candidates, and exact common-product color tools use an explicit bonding assumption. Versions are G-code v0.28.0, strength v0.25.0 and quote v0.13.0; pricing policy is unchanged. See the release document for verified scope and withheld-input reasons.
+
+Previous host release: [IPAS v0.5.26 profile auto-selection and price provenance](docs/ipas-profile-autoselect-20261008.md).
 
 **IPAS-QUOTE ENGINE** is the quote calculation engine of **IPAS / Integrated Printing Analysis System**. The integrated system connects [IPAS-STRENGTH ENGINE](https://github.com/mk0000001/IPAS-STRENGTH-ENGINE), [IPAS-GCODE ENGINE](https://github.com/mk0000001/IPAS-GCODE-ENGINE), and [IPAS-QUOTE ENGINE](https://github.com/mk0000001/IPAS-QUOTE-ENGINE). The Python package name `print_quote_engine` is retained for compatibility with existing integrations.
 

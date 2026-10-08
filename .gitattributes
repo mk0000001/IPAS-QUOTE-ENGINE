@@ -1,2 +1,3 @@
 # Release patches preserve source line endings for exact hash reconstruction.
 docs/patches/ipas-profile-autoselect-20261008*.patch -text
+docs/patches/ipas-reference-capacity-20261008.patch -text whitespace=-blank-at-eol,cr-at-eol

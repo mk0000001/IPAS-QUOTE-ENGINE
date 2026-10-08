@@ -1,0 +1,57 @@
+{
+  "schema": "IPAS_REFERENCE_CAPACITY_PUBLIC_EVIDENCE_V1",
+  "app_version": "0.5.27-reference-capacity",
+  "strength_version": "0.25.0",
+  "strength_revision_count": 25,
+  "actual_release_code_commit": "03ce183d7e7f9ffa73fe8a0ba2e5bccc68cbec49",
+  "runtime_previous_published_commit_anchor": "f0656c8f79ccb5ff779cc4babafd7d6ea21e02f9",
+  "source_freeze_identity_sha256": "d81f78dfffc0f3102300c98ba3e59aef546053c6b2b7e063d387e67ec1fc69bf",
+  "image_digest": "sha256:1e038770091e53427238121ca7462d0ec0450d5d41c71bec295af236bd02df1d",
+  "public_host_patch_sha256": "c1d4e8b326627e66e987f5f26a0daf83e1c4cc086ea161c14cec16495cc05d8f",
+  "host_tests": {
+    "ordinary_passed": 882,
+    "subtests_passed": 199,
+    "skipped": 21
+  },
+  "strength_tests": {
+    "ordinary_passed": 316,
+    "subtests_passed": 710,
+    "skipped": 0
+  },
+  "javascript_checks_passed": 27,
+  "local_supplement": {
+    "ordinary_passed": 43,
+    "subtests_passed": 1,
+    "execution": "LOCAL_NOT_IMAGE"
+  },
+  "cache_corpus": {
+    "schema": "REFERENCE_CAPACITY_MODEL_REPLAY_V2",
+    "printing_payloads": 1691,
+    "nonprinting_controls": 2,
+    "numeric": 939,
+    "withheld": 752,
+    "incomplete_cached_inputs": 745,
+    "explained_withheld_complete_cache": 7,
+    "unexplained_null": 0,
+    "invariant_failures": 0
+  },
+  "additional_original_rescans": {
+    "target": 745,
+    "completed": 159,
+    "complete": false
+  },
+  "original_fixture": {
+    "selected_bytes_read_to_eof": 103768099,
+    "reference_candidates": 6,
+    "numeric_candidates": 6,
+    "customer_pages": 9,
+    "administrator_pages": 10,
+    "report_viewer_loads_identical": true
+  },
+  "live": {
+    "services_verified": 4,
+    "numeric_candidates": 6,
+    "saved_estimates_preserved": 100
+  },
+  "measured_part_failure_accuracy_validated": false
+}
