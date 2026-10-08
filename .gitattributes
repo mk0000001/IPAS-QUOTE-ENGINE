@@ -3,3 +3,4 @@ docs/patches/ipas-profile-autoselect-20261008*.patch -text
 docs/patches/ipas-reference-capacity-20261008.patch -text whitespace=-blank-at-eol,cr-at-eol
 docs/patches/ipas-paht-reference-20261008.patch -text whitespace=-blank-at-eol,cr-at-eol
 docs/patches/ipas-fusrock-tensile-20261008.patch -text whitespace=-blank-at-eol,cr-at-eol
+docs/patches/ipas-compact-sections-20261008.patch -text whitespace=-blank-at-eol,cr-at-eol

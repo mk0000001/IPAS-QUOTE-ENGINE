@@ -1,0 +1,867 @@
+diff --git a/app/automatic_capacity.py b/app/automatic_capacity.py
+--- a/app/automatic_capacity.py
++++ b/app/automatic_capacity.py
+@@ -8,6 +8,7 @@
+ from zipfile import ZipFile
+ from print_gcode_engine.scanner import scan
+ from print_strength_engine.automatic_sections import VERSION as SECTION_VERSION,valid_plane_mechanics,valid_component_selection
++from print_strength_engine.compact_sections import CompactGeometryBudget,resource_policy,POLICY_ID,RESOURCE_GAP
+ from print_strength_engine.component_sections import reference_section_candidates,COMPONENT_KINDS
+ from print_strength_engine.interlayer_contact import VERSION as CONTACT_VERSION,valid_contact_descriptor
+ from print_strength_engine.local_process import VERSION as PROCESS_VERSION,StreamingLocalProcess,valid_process_descriptor,VOLUME_PROVENANCE
+@@ -125,6 +126,37 @@
+ 
+ 
+ def _reject_nonfinite(token):raise ValueError('NONFINITE_CACHE_VALUE')
++
++
++def _current_section_resource_policy(value):
++    """Retry old budget-only caches only when no valid declared section remains."""
++    declared=list(value['sections'].values())
++    has_declared_complete=any(section['status']=='COMPLETE' for section in declared)
++    volumes=[process['volume_section'] for process in value['local_process'].values()]
++    budget_gaps={'LOCAL_SECTION_GEOMETRY_BUDGET_EXCEEDED',RESOURCE_GAP}
++    inspected=[(True,section) for section in declared]+[(False,section) for section in volumes]
++    for retry_eligible,section in inspected:
++        gaps=set(section.get('assessment_gaps') or [])
++        budget_only=(retry_eligible and not has_declared_complete and section['status']=='WITHHELD' and bool(gaps & budget_gaps) and gaps<=budget_gaps
++                     and value.get('source_scan_complete') is True and value.get('source_geometry_complete') is True)
++        marker=section.get('resource_compaction')
++        if marker is None:
++            if budget_only:return False
++            continue
++        if value.get('section_resource_policy')!=resource_policy():return False
++        if not isinstance(marker,dict) or marker.get('policy_id')!=POLICY_ID or marker.get('attempted') is not True:return False
++        limit=marker.get('max_packed_bytes')
++        if type(limit) is not int or limit!=resource_policy()['max_packed_bytes']:return False
++        for key in ('peak_shared_packed_bytes','peak_shared_coordinates'):
++            peak=marker.get(key)
++            if type(peak) is not int or peak<0:return False
++        if section['status']=='COMPLETE':
++            if marker.get('applied') is not True or marker.get('status')!='APPLIED':return False
++        else:
++            if marker.get('applied') is not False:return False
++            expected='RESOURCE_BUDGET_EXCEEDED' if gaps & budget_gaps else 'WITHHELD'
++            if marker.get('status')!=expected:return False
++    return True
+ 
+ 
+ def _empty_reference_process(process,candidate,declared,artifact):
+@@ -206,6 +238,7 @@
+                     if not isinstance(motions,int) or isinstance(motions,bool) or motions!=count:return None
+         if source_sha256 is not None and value.get('source_sha256')!=source_sha256:return None
+         if archive_member is not None and value.get('archive_member')!=archive_member:return None
++        if not _current_section_resource_policy(value):return None
+         return value
+     except (OSError,ValueError,TypeError,KeyError,OverflowError,RecursionError):return None
+ 
+@@ -363,6 +396,7 @@
+     local=_prepared_local(directory,json.loads((directory/LOCAL_FILE).read_text(encoding='utf-8')),height_seed=seeds['height'])
+     candidates=_candidate_rows(local)
+     base={'version':VERSION,'section_model_version':SECTION_VERSION,'contact_model_version':CONTACT_VERSION,'local_process_version':PROCESS_VERSION,'geometry_version':local['version'],'candidate_fingerprint':candidate_fingerprint(local),
++          'section_resource_policy':resource_policy(),
+           'source_sha256':source_sha256,'archive_member':member,'source_scan_complete':False,
+           'source_geometry_complete':False,'model_records_seen':0,'assessment_gaps':[],
+           'arc_chord_tolerance_mm':.05,'arc_chord_approximation':False,'sections':{},'contacts':{},'local_process':{},'contact_status':'NO_CANDIDATES'}
+@@ -384,9 +418,10 @@
+     else:
+         from print_strength_engine.automatic_sections import StreamingSections
+         from print_strength_engine.interlayer_contact import StreamingInterlayerContact
+-        collector=_CollectorGroups(StreamingSections,candidates)
++        compact_budget=CompactGeometryBudget()
++        collector=_CollectorGroups(StreamingSections,candidates,compact_budget=compact_budget)
+         contacts=_CollectorGroups(StreamingInterlayerContact,candidates,cancelled=cancelled)
+-        process=_CollectorGroups(StreamingLocalProcess,candidates);writer=_MotionCollector(collector,contacts,process)
++        process=_CollectorGroups(StreamingLocalProcess,candidates,compact_budget=compact_budget);writer=_MotionCollector(collector,contacts,process)
+         for field,value in seeds.items():
+             if value is not None:
+                 setattr(writer.contours,field,value);setattr(writer.contours,'declared_'+field,value)
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,7 +1,7 @@
+ import os
+ from pathlib import Path
+ 
+-VERSION = '0.5.29-fusrock-tensile'
++VERSION = '0.5.30-compact-sections'
+ 
+ def secret(name: str) -> str:
+     file = os.getenv(name + '_FILE')
+diff --git a/app/report_capacity_layout.py b/app/report_capacity_layout.py
+--- a/app/report_capacity_layout.py
++++ b/app/report_capacity_layout.py
+@@ -6,7 +6,7 @@
+ from math import isfinite
+ 
+ from .strength_points import (AUTOMATIC_ASSUMPTIONS_NOTE, BENDING_UNSUPPORTED_NOTE, PROCESS_ROLES,
+-    capacity_report_lines, force_label, geometry_scenario_report_lines,
++    capacity_report_lines, force_label, geometry_scenario_report_lines, section_measure_label,
+     local_process_report_lines, material_reference_report_lines, weakness_report_lines)
+ 
+ SUMMARY_HEADERS=('취약 후보 · 위치','굽힘 참고 · 25 mm','축방향 당김 참고')
+@@ -47,7 +47,7 @@
+         area=(scenarios.get(GEOMETRY_KEYS.get(selected)) or {}).get('area_mm2')
+         if not _positive(area):area=capacity.get('effective_load_bearing_area_mm2')
+     lines=['선택 조건 · '+GEOMETRY_LABELS.get(selected,'기하 조건 미기록')]
+-    if _positive(area):lines.append(f"{'굽힘' if mode=='bending' else '인장'} 경로 단면 {area:.2f} mm²")
++    if _positive(area):lines.append(f"{'굽힘' if mode=='bending' else '인장'} 경로 단면 {section_measure_label(area)} mm²")
+     elif mode=='bending':lines.append('굽힘 단면 면적 미기록')
+     return lines
+ 
+@@ -123,6 +123,11 @@
+         if (capacity.get('geometry_scenarios') or {}).get('selection')=='LOWER_CONDITIONAL_REFERENCE':
+             geometry=geometry[:-1]
+         if geometry:rows.append(('기하 조건 비교',geometry))
++        modulus=capacity.get('section_modulus_mm3')
++        if capacity.get('bending_supported') is not False and _positive(modulus):
++            rows.append(('선택 굽힘 단면', [
++                f'굽힘 단면계수 {section_measure_label(modulus)} mm³',
++                '국부 단면의 모든 굽힘 방향 중 가장 작은 단면계수를 사용합니다.']))
+         distance=capacity.get('bending_lever_mm',25)
+         other=[f"굽힘 {s['lever_mm']:g} mm · {force_label(s.get('force_n'))}"
+             for s in capacity.get('bending_scenarios') or [] if s.get('lever_mm')!=distance] if capacity.get('bending_supported') is not False else []
+diff --git a/app/strength_points.py b/app/strength_points.py
+--- a/app/strength_points.py
++++ b/app/strength_points.py
+@@ -81,7 +81,7 @@
+         if _finite_nonnegative(area) and area>0:
+             axial=' · 축방향 '+force_label(scenario.get('axial_force_n')) if 'axial_force_n' in scenario else ''
+             bending='굽힘 미지원' if capacity.get('bending_supported') is False else '굽힘 '+force_label(scenario.get('bending_force_n'))
+-            lines.append(f'{label} {area:.2f} mm² · '+bending+axial)
++            lines.append(f'{label} {section_measure_label(area)} mm² · '+bending+axial)
+         else:lines.append(label+' 미산출 · 해당 명령·단면의 확인 자료 부족')
+     labels={'DECLARED_ROADS':'선언 폭·높이','COMMANDED_VOLUME_EQUIVALENT':'명령 체적 등가 직사각'}
+     bending=scenarios.get('selected_geometry');axial=scenarios.get('selected_axial_geometry')
+@@ -122,9 +122,25 @@
+     except (TypeError,ValueError):return '미산출'
+     if not isfinite(value) or value<0:return '미산출'
+     kgf=value/GRAVITY
+-    if kgf<1:return f'약 {kgf*1000:,.0f} g 무게 · {value:.2f} N'
++    if kgf<1:
++        # Keep positive tiny local-component references distinct from zero.
++        grams=kgf*1000 if kgf>0 else value*(1000/GRAVITY)
++        weight=f'{grams:,.0f} g' if grams>=1 or value==0 else (
++            f'{_small_positive_force_number(grams)} g' if grams>=.001 else f'{_small_positive_force_number(grams*1000)} mg')
++        newtons=_small_positive_force_number(value) if 0<value<.01 else f'{value:.2f}'
++        return f'약 {weight} 무게 · {newtons} N'
+     weight=f'{kgf:,.0f}' if kgf>=10 else f'{kgf:.1f}'
+     return f'약 {weight} kg 무게 · {value:,.0f} N · {kgf:,.1f} kgf'
++
++
++def _small_positive_force_number(value):
++    return (f'{value:.2e}' if value<.0001 else f'{value:#.3g}').replace('e-0','e-').replace('e+0','e+')
++
++
++def section_measure_label(value):
++    """Preserve positive small areas/moduli while keeping ordinary labels."""
++    if not _finite_nonnegative(value):return '미산출'
++    return _small_positive_force_number(value) if 0<value<.01 else f'{value:.2f}'
+ 
+ 
+ def section_lever_mm(candidate,bounds):
+diff --git a/app/web/gcode-viewer.js b/app/web/gcode-viewer.js
+--- a/app/web/gcode-viewer.js
++++ b/app/web/gcode-viewer.js
+@@ -442,7 +442,7 @@
+     const n=Number(newtons);
+     if(newtons==null||!Number.isFinite(n)||n<0)return '미산출';
+     const kgf=n/9.80665;
+-    if(kgf<1)return `약 ${Math.round(kgf*1000).toLocaleString('ko-KR')} g 무게(${n.toFixed(2)} N)`;
++    if(kgf<1){const text=smallForceText(n,kgf);return `약 ${text.weight} 무게(${text.newtons} N)`;}
+     const kg=kgf>=10?Math.round(kgf).toLocaleString('ko-KR'):kgf.toFixed(1);
+     return `약 ${kg} kg 무게(${Math.round(n).toLocaleString('ko-KR')} N · ${kgf.toFixed(1)} kgf)`;
+   }
+@@ -450,8 +450,20 @@
+     const n=Number(newtons);
+     if(newtons==null||!Number.isFinite(n)||n<0)return '미산출';
+     const kgf=n/9.80665;
+-    if(kgf<1)return `약 ${Math.round(kgf*1000).toLocaleString('ko-KR')} g · ${n.toFixed(2)} N`;
++    if(kgf<1){const text=smallForceText(n,kgf);return `약 ${text.weight} · ${text.newtons} N`;}
+     return `약 ${kgf>=10?Math.round(kgf).toLocaleString('ko-KR'):kgf.toFixed(1)} kg · ${Math.round(n).toLocaleString('ko-KR')} N`;
++  }
++  function smallForceText(n,kgf){
++    // Do not round a positive tiny connected-component reference to zero.
++    const grams=kgf>0?kgf*1000:n*(1000/9.80665);
++    const significant=value=>value<.0001?value.toExponential(2):value.toPrecision(3);
++    const weight=grams>=1||n===0?`${Math.round(grams).toLocaleString('ko-KR')} g`:
++      grams>=.001?`${significant(grams)} g`:`${significant(grams*1000)} mg`;
++    return {weight,newtons:n>0&&n<.01?significant(n):n.toFixed(2)};
++  }
++  function formatSectionMeasure(value){
++    if(typeof value!=='number'||!Number.isFinite(value)||value<0)return '미산출';
++    return value>0&&value<.01?(value<.0001?value.toExponential(2):value.toPrecision(3)):value.toFixed(2);
+   }
+   function candidateCapacityView(candidate){
+     const result={automatic:false,legacy:false,state:'층 비교 전용'};
+@@ -466,7 +478,7 @@
+         return {...result,automatic:true,bendingSupported:false,
+           primary:'굽힘 예상 미지원 · 유연 소재의 선형 굽힘 모델 미검증',
+           axial:`축방향 예상 · ${formatForceShort(capacity.axial_capacity_n)}`,
+-          area:`G-code 경로 순단면 · 축방향 ${capacity.effective_load_bearing_area_mm2.toFixed(2)} mm² (추정)`,
++          area:`G-code 경로 순단면 · 축방향 ${formatSectionMeasure(capacity.effective_load_bearing_area_mm2)} mm² (추정)`,
+           scenarios:[],note:'소재 인장 참고값과 경로 순단면으로 축방향 하중을 추정합니다. 유연 소재의 큰 변형을 선형 굽힘 모델로 환산하지 않습니다. 실제 파단하중·안전 허용하중은 아닙니다.'};
+       }
+       const scenarios=Array.isArray(capacity.bending_scenarios)?capacity.bending_scenarios:[];
+@@ -476,7 +488,7 @@
+         finite(capacity.section_modulus_mm3)&&capacity.section_modulus_mm3>0&&distances.every(Boolean)){
+         return {...result,automatic:true,primary:`자동 굽힘 예상 · ${formatForceShort(capacity.bending_force_n)} · 25 mm 거리`,
+           axial:`축방향 예상 · ${formatForceShort(capacity.axial_capacity_n)}`,
+-          area:capacity.geometry_scenarios?.selected_axial_geometry?`G-code 경로 순단면 · 축방향 ${capacity.effective_load_bearing_area_mm2.toFixed(2)} mm² (추정) · 굽힘 단면계수 ${capacity.section_modulus_mm3.toFixed(2)} mm³`:`G-code 경로 순단면 · ${capacity.effective_load_bearing_area_mm2.toFixed(2)} mm² (추정) · 단면계수 ${capacity.section_modulus_mm3.toFixed(2)} mm³`,
++          area:capacity.geometry_scenarios?.selected_axial_geometry?`G-code 경로 순단면 · 축방향 ${formatSectionMeasure(capacity.effective_load_bearing_area_mm2)} mm² (추정) · 굽힘 단면계수 ${formatSectionMeasure(capacity.section_modulus_mm3)} mm³`:`G-code 경로 순단면 · ${formatSectionMeasure(capacity.effective_load_bearing_area_mm2)} mm² (추정) · 단면계수 ${formatSectionMeasure(capacity.section_modulus_mm3)} mm³`,
+           scenarios:distances.map(row=>`${row.lever_mm} mm 거리 · ${formatForceShort(row.force_n)}`),
+           note:'소재 시편 참고 강도를 국부 경로 순단면으로 환산한 예상입니다. 시편의 면적 기준을 이 순단면에 옮기는 가정과 국부 범위의 완전 접합을 전제합니다. 실제 비드·접합은 실측하지 않았습니다. 거리가 길수록 굽힘 예상 하중은 줄며, 안전하중이나 실제 파단을 보장하지 않습니다.'};
+       }
+@@ -550,7 +562,7 @@
+         const scenario=scenarios[key]||{};
+         const axial=Object.hasOwn(scenario,'axial_force_n')?` · 축방향 ${formatForceShort(scenario.axial_force_n)}`:'';
+         const bending=candidate.estimated_capacity?.bending_supported===false?'굽힘 미지원':`굽힘 ${formatForceShort(scenario.bending_force_n)}`;
+-        lines.push(finite(scenario.area_mm2)&&scenario.area_mm2>0?`${label} ${scenario.area_mm2.toFixed(2)} mm² · ${bending}${axial}`:`${label} 미산출 · 해당 명령·단면의 확인 자료 부족`);
++        lines.push(finite(scenario.area_mm2)&&scenario.area_mm2>0?`${label} ${formatSectionMeasure(scenario.area_mm2)} mm² · ${bending}${axial}`:`${label} 미산출 · 해당 명령·단면의 확인 자료 부족`);
+       });
+       const labels={DECLARED_ROADS:'선언 폭·높이',COMMANDED_VOLUME_EQUIVALENT:'명령 체적 등가 직사각'};
+       const bending=scenarios.selected_geometry,axial=scenarios.selected_axial_geometry;
+diff --git a/app/web/index.html b/app/web/index.html
+--- a/app/web/index.html
++++ b/app/web/index.html
+@@ -15,8 +15,8 @@
+   <link rel="manifest" href="/web/site.webmanifest?v=20261008-ipas">
+   <link rel="stylesheet" href="/web/styles.css?v=20261008-ipas">
+   <script defer src="/web/load-case.js?v=20261003-profile-match"></script>
+-  <script defer src="/web/gcode-viewer.js?v=20261008-reference-capacity"></script>
+-  <script defer src="/web/app.js?v=20261008-fusrock-tensile"></script>
++  <script defer src="/web/gcode-viewer.js?v=20261008-compact-sections"></script>
++  <script defer src="/web/app.js?v=20261008-compact-sections"></script>
+ </head>
+ <body>
+   <a class="skip-link" href="#calculator">계산기로 바로가기</a>
+diff --git a/tests/test_automatic_compact_cache_policy.py b/tests/test_automatic_compact_cache_policy.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_automatic_compact_cache_policy.py
+@@ -0,0 +1,181 @@
++"""Synthetic selective retry; complete legacy numeric caches stay current."""
++from copy import deepcopy
++import json
++from unittest.mock import patch
++import pytest
++
++from app import automatic_capacity as automatic
++from app.local_geometry import LOCAL_FILE,VERSION
++from print_strength_engine import automatic_sections as sections
++
++POLICY={'id':'EXACT_UNION_COMPACT_V1','max_packed_bytes':128*1024**2,'per_cut_max_union_vertices':1000000}
++
++
++def local():
++    return {'version':VERSION,'status':'THIN_REGIONS_FOUND','candidates':[{
++        'region_id':'synthetic-plane','kind':'LOCAL_THIN_SECTION','section_normal_axis':'X',
++        'section_station_mm':50,'axial_section_station_mm':50,'bending_section_station_mm':50,
++        'section_window_bounds_mm':[[40,60],[-1,11],[-1,3]],
++        'bounds_mm':[[45,55],[0,10],[0,2]],'position_mm':[50,5,1]}]}
++
++
++def beam_source():
++    lines=['G90','M83',';WIDTH:1',';HEIGHT:1']
++    for z in (1,2):
++        lines+=[';LAYER_CHANGE',f'G0 Z{z}']
++        for y in range(10):lines += [f'G0 X0 Y{y+.5}','G1 X100 E1']
++    return ('\n'.join(lines)+'\n').encode()
++
++
++def prepare(tmp_path,*,raw_cap=None,invalid_source=False):
++    directory=tmp_path/'cache';directory.mkdir()
++    document=local();(directory/LOCAL_FILE).write_text(json.dumps(document),encoding='utf-8')
++    source=tmp_path/'synthetic.gcode'
++    invalid=b'G90\nM83\n;WIDTH:1\n;HEIGHT:1\nG0 Z0\nG1 X1 Z1 E1\n' if invalid_source else b''
++    source.write_bytes(invalid+beam_source())
++    if raw_cap is None:value=automatic.compute(source,directory,source_sha256='synthetic-source')
++    else:
++        with patch.object(sections,'MAX_SECTION_PIECES',raw_cap):
++            value=automatic.compute(source,directory,source_sha256='synthetic-source')
++    return directory,document,value
++
++
++def write(directory,value):
++    (directory/automatic.FILE).write_text(json.dumps(value),encoding='utf-8')
++
++
++def old_budget_fixture(value):
++    """Valid empty withheld descriptor from a complete scan, not a numeric prefix."""
++    value=deepcopy(value);value.pop('section_resource_policy',None)
++    value['status']='WITHHELD'
++    for section in value['sections'].values():
++        for key in ('axial','bending'):section[key]=None
++        for key in ('area_mm2','min_principal_section_modulus_mm3','minimum_all_direction_section_modulus_mm3',
++                    'weakest_local_bending_stress_gradient_xyz','critical_bending_moment_direction_xyz'):
++            section[key]=None
++        section.update(status='WITHHELD',complete=False,tools=[],assessment_gaps=['LOCAL_SECTION_GEOMETRY_BUDGET_EXCEEDED'])
++        section.pop('resource_compaction',None)
++    return value
++
++
++def test_complete_legacy_cache_without_policy_remains_current_and_byte_identical(tmp_path):
++    directory,document,value=prepare(tmp_path)
++    value.pop('section_resource_policy',None);write(directory,value)
++    before=(directory/automatic.FILE).read_bytes()
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++    assert (directory/automatic.FILE).read_bytes()==before
++
++
++def test_old_budget_only_cache_without_policy_is_selectively_stale(tmp_path):
++    directory,document,value=prepare(tmp_path,raw_cap=1)
++    value=old_budget_fixture(value);write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_available_policy_alone_does_not_prevent_retry_of_old_budget_failure(tmp_path):
++    directory,document,value=prepare(tmp_path,raw_cap=1)
++    value=old_budget_fixture(value);value['section_resource_policy']=POLICY;write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_matching_failed_compact_attempt_is_current_without_retry_loop(tmp_path):
++    directory,document,value=prepare(tmp_path,raw_cap=1)
++    value=old_budget_fixture(value);value['section_resource_policy']=POLICY
++    for section in value['sections'].values():
++        section['resource_compaction']={'policy_id':POLICY['id'],'attempted':True,'applied':False,
++                                        'status':'RESOURCE_BUDGET_EXCEEDED',
++                                        'max_packed_bytes':POLICY['max_packed_bytes'],
++                                        'peak_shared_packed_bytes':0,'peak_shared_coordinates':0}
++    write(directory,value)
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_unknown_failed_compact_policy_cannot_make_old_budget_cache_current(tmp_path):
++    directory,document,value=prepare(tmp_path,raw_cap=1)
++    value=old_budget_fixture(value);value['section_resource_policy']=POLICY
++    for section in value['sections'].values():
++        section['resource_compaction']={'policy_id':'unknown-policy','attempted':True,'applied':False,
++                                        'status':'RESOURCE_BUDGET_EXCEEDED'}
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_policy_marker_does_not_relax_incomplete_numeric_source_validation(tmp_path):
++    directory,document,value=prepare(tmp_path)
++    value['section_resource_policy']=POLICY;value['source_scan_complete']=False
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_existing_no_candidate_cache_is_still_terminal_without_claiming_a_scan(tmp_path):
++    directory=tmp_path/'cache';directory.mkdir();document={'version':VERSION,'status':'NO_THIN_REGIONS','candidates':[]}
++    (directory/LOCAL_FILE).write_text(json.dumps(document),encoding='utf-8')
++    value=automatic.compute(tmp_path/'unused.gcode',directory)
++    assert value['source_scan_complete'] is False
++    assert automatic.current(directory,document)
++
++
++def test_forged_applied_without_attempt_cannot_make_old_budget_cache_current(tmp_path):
++    directory,document,value=prepare(tmp_path,raw_cap=1)
++    value=old_budget_fixture(value);value['section_resource_policy']=POLICY
++    for section in value['sections'].values():
++        section['resource_compaction']={'policy_id':POLICY['id'],'attempted':False,'applied':True,'status':'APPLIED'}
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_stale_outer_policy_limits_cannot_make_old_budget_cache_current(tmp_path):
++    directory,document,value=prepare(tmp_path,raw_cap=1)
++    value=old_budget_fixture(value);value['section_resource_policy']={**POLICY,'max_packed_bytes':256*1024**2}
++    for section in value['sections'].values():
++        section['resource_compaction']={'policy_id':POLICY['id'],'attempted':True,'applied':False,'status':'RESOURCE_BUDGET_EXCEEDED'}
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_incomplete_geometry_with_budget_gap_remains_terminal_without_resource_retry(tmp_path):
++    directory,document,value=prepare(tmp_path,invalid_source=True)
++    assert value['source_scan_complete'] is True
++    assert value['source_geometry_complete'] is False
++    value=old_budget_fixture(value);write(directory,value)
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_incomplete_scan_with_budget_gap_remains_terminal_without_resource_retry(tmp_path):
++    directory,document,value=prepare(tmp_path,invalid_source=True)
++    value=old_budget_fixture(value);value['source_scan_complete']=False;write(directory,value)
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def partial_budget_fixture(tmp_path,*,optional_volume_budget=False):
++    document=local();second=deepcopy(document['candidates'][0])
++    second['region_id']='synthetic-budget-plane';document['candidates'].append(second)
++    with patch(__name__+'.local',return_value=document):
++        directory,document,complete=prepare(tmp_path)
++    value=old_budget_fixture(complete);value['status']='PARTIAL'
++    key=document['candidates'][0]['region_id'];value['sections'][key]=deepcopy(complete['sections'][key])
++    if optional_volume_budget:
++        for process in value['local_process'].values():
++            process['volume_section']=old_budget_fixture({'sections':{'volume':process['volume_section']}})['sections']['volume']
++    return directory,document,value
++
++
++@pytest.mark.parametrize('optional_volume_budget',[False,True])
++def test_valid_partial_legacy_cache_remains_current_without_replacing_numeric_sections(tmp_path,optional_volume_budget):
++    directory,document,value=partial_budget_fixture(tmp_path,optional_volume_budget=optional_volume_budget)
++    write(directory,value);before=(directory/automatic.FILE).read_bytes()
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++    assert (directory/automatic.FILE).read_bytes()==before
++
++
++@pytest.mark.parametrize('invalid',['source','fingerprint','marker'])
++def test_partial_legacy_cache_still_rejects_invalid_proof_or_marker(tmp_path,invalid):
++    directory,document,value=partial_budget_fixture(tmp_path)
++    if invalid=='source':value['source_scan_complete']=False
++    elif invalid=='fingerprint':value['candidate_fingerprint']='invalid-fingerprint'
++    else:
++        value['section_resource_policy']=POLICY
++        value['sections']['synthetic-budget-plane']['resource_compaction']={
++            'policy_id':'unknown-policy','attempted':True,'applied':False,'status':'RESOURCE_BUDGET_EXCEEDED'}
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
+diff --git a/tests/test_compact_section_resources.py b/tests/test_compact_section_resources.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_compact_section_resources.py
+@@ -0,0 +1,244 @@
++"""Synthetic behavior contracts for a separately bounded exact-union fallback."""
++from copy import deepcopy
++import json
++from unittest.mock import patch
++
++import pytest
++from print_strength_engine import automatic_sections as sections
++from print_strength_engine.local_process import StreamingLocalProcess
++
++
++def point(axis='Z',component=False):
++    return {'kind':'COMPONENT_REFERENCE_SECTION' if component else 'LOCAL_THIN_SECTION',
++            'region_id':'synthetic-plane','section_normal_axis':axis,
++            'section_station_mm':.5,'axial_section_station_mm':.5,'bending_section_station_mm':.5,
++            'section_window_bounds_mm':[[-20,20],[-20,20],[0,2]]}
++
++
++def roads():
++    return [([-4,y,1],[4,y,1],1.,1.,tool) for y,tool in ((0,0),(.5,1),(1.,0))]
++
++
++def extract(rows=None,candidate=None,**kwargs):
++    collector=sections.StreamingSections([candidate or point()],**kwargs)
++    for row in rows or roads():collector.segment(*row)
++    return collector.finish()['synthetic-plane']
++
++
++def budget(**kwargs):
++    from print_strength_engine.compact_sections import CompactGeometryBudget
++    return CompactGeometryBudget(**kwargs)
++
++
++def numeric_payload(value):
++    return {key:deepcopy(item) for key,item in value.items() if key!='resource_compaction'}
++
++
++def direction_invariant_payload(value):
++    """Opposite extreme fibers are an equally governing direction on symmetry."""
++    result=numeric_payload(value)
++    for descriptor in [result,result.get('axial') or {},result.get('bending') or {}]:
++        for key in ('critical_stress_gradient_uv','critical_bending_moment_direction_uv',
++                    'weakest_local_bending_stress_gradient_xyz','critical_bending_moment_direction_xyz'):
++            if key in descriptor:
++                sign=next((1 if number>0 else -1 for number in descriptor[key] if abs(number)>1e-15),1)
++                descriptor[key]=[sign*number for number in descriptor[key]]
++        if 'boundary_support_vertices_relative_uv_mm' in descriptor:
++            descriptor['boundary_support_vertices_relative_uv_mm']=sorted(descriptor['boundary_support_vertices_relative_uv_mm'])
++    return result
++
++
++def test_normal_raw_result_bytes_do_not_change_when_shared_policy_is_available():
++    before=extract()
++    after=extract(compact_budget=budget())
++    assert json.dumps(after,sort_keys=True,allow_nan=False)==json.dumps(before,sort_keys=True,allow_nan=False)
++    assert 'resource_compaction' not in after
++
++
++def test_raw_piece_cap_triggers_fallback_instead_of_publishing_prefix_or_withholding_valid_geometry():
++    expected=extract()
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(compact_budget=budget())
++    assert actual['status']=='COMPLETE'
++    assert numeric_payload(actual)==expected
++    assert actual['resource_compaction']['attempted'] is True
++    assert actual['resource_compaction']['applied'] is True
++
++
++def test_compact_byte_exhaustion_is_separate_and_never_publishes_a_partial_area():
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(compact_budget=budget(max_packed_bytes=1))
++    assert actual['status']=='WITHHELD'
++    assert actual['area_mm2'] is None
++    assert 'LOCAL_SECTION_COMPACT_RESOURCE_BUDGET_EXCEEDED' in actual['assessment_gaps']
++    assert actual['resource_compaction']['attempted'] is True
++    assert actual['resource_compaction']['applied'] is False
++
++
++def test_per_cut_union_vertex_limit_still_withholds_compacted_geometry():
++    with patch.object(sections,'MAX_SECTION_PIECES',1),patch.object(sections,'MAX_UNION_VERTICES',3):
++        actual=extract(compact_budget=budget())
++    assert actual['status']=='WITHHELD'
++    assert actual['area_mm2'] is None
++
++
++def test_raw_final_vertex_budget_failure_gets_one_real_fallback_attempt_and_terminal_marker():
++    with patch.object(sections,'MAX_UNION_VERTICES',3):actual=extract(compact_budget=budget())
++    assert actual['status']=='WITHHELD'
++    assert actual['area_mm2'] is None
++    assert actual['resource_compaction']['attempted'] is True
++    assert actual['resource_compaction']['applied'] is False
++
++
++def test_overlapping_different_tools_are_all_retained_after_compaction():
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(compact_budget=budget())
++    assert actual['tools']==[0,1]
++    assert actual['axial']['tools']==[0,1]
++    assert actual['bending']['tools']==[0,1]
++    assert actual['area_mm2']==16
++
++
++@pytest.mark.parametrize('axis',['X','Y','Z'])
++def test_fallback_uses_same_clipped_plane_for_all_normal_axes(axis):
++    candidate=point(axis)
++    rows=[([-4+i*.5,y,1],[4-i*.5,y,1],1,1,tool) for i,(y,tool) in enumerate(((0,0),(.5,1),(1,0)))]
++    expected=extract(rows,candidate)
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(rows,candidate,compact_budget=budget())
++    assert actual['status']=='COMPLETE'
++    assert direction_invariant_payload(actual)==direction_invariant_payload(expected)
++
++
++def test_holes_are_preserved_without_solid_filling():
++    frame=[([-5,-4.5,1],[5,-4.5,1],1,1,0),([-5,4.5,1],[5,4.5,1],1,1,0),
++           ([-4.5,-5,1],[-4.5,5,1],1,1,0),([4.5,-5,1],[4.5,5,1],1,1,0)]
++    expected=extract(frame)
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(frame,compact_budget=budget())
++    assert numeric_payload(actual)==expected
++    assert actual['area_mm2']==36
++    assert actual['axial']['hole_count']==1
++
++
++def test_reference_component_selection_does_not_sum_disconnected_bodies():
++    separate=[([-4,0,1],[4,0,1],1,1,0),([10,0,1],[11,0,1],.5,1,1)]
++    expected=extract(separate,point(component=True))
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(separate,point(component=True),compact_budget=budget())
++    assert numeric_payload(actual)==expected
++    assert actual['component_count']==2
++    assert actual['area_mm2']==.5
++    assert actual['tools']==[1]
++    assert sections.valid_component_selection(actual)
++
++
++def test_duplicate_road_with_new_tool_keeps_tool_proof_even_after_geometry_deduplication():
++    rows=roads()+[(*roads()[0][:-1],3)]
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        actual=extract(rows,compact_budget=budget())
++    assert actual['area_mm2']==16
++    assert actual['tools']==[0,1,3]
++
++
++def test_local_commanded_volume_collector_receives_same_resource_budget_instance():
++    shared=budget()
++    declared=sections.StreamingSections([point()],compact_budget=shared)
++    volume=StreamingLocalProcess([point()],compact_budget=shared)
++    assert declared.compact_budget is shared
++    assert volume.sections.compact_budget is shared
++
++
++def test_incomplete_source_still_withholds_after_successful_compaction():
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        collector=sections.StreamingSections([point()],compact_budget=budget())
++        for row in roads():collector.segment(*row)
++        actual=collector.finish(complete=False)['synthetic-plane']
++    assert actual['status']=='WITHHELD'
++    assert actual['area_mm2'] is None
++    assert 'INCOMPLETE_SOURCE_SCAN' in actual['assessment_gaps']
++
++
++def test_shared_aggregate_exhaustion_releases_failed_cut_and_does_not_regrow_it():
++    rows=roads()[:2]
++    for _ in range(2):
++        with patch.object(sections,'MAX_SECTION_PIECES',1):
++            assert extract(rows,compact_budget=budget(max_packed_bytes=600))['status']=='COMPLETE'
++    shared=budget(max_packed_bytes=600)
++    with patch.object(sections,'MAX_SECTION_PIECES',1):
++        first=sections.StreamingSections([point()],compact_budget=shared)
++        second=sections.StreamingSections([point()],compact_budget=shared)
++        for row in rows:first.segment(*row);second.segment(*row)
++        assert first.finish()['synthetic-plane']['status']=='WITHHELD'
++        cut=next(iter(first.cuts.values()))
++        assert not cut['pieces'] and not cut['compact'].tools
++        retained=dict(shared.usage)
++        for _ in range(10):first.segment(*rows[0])
++        assert shared.usage==retained
++        assert second.finish()['synthetic-plane']['status']=='COMPLETE'
++
++
++def test_final_union_vertex_cap_does_not_count_duplicate_tool_storage_as_final_vertices():
++    rows=[([-4,0,1],[4,0,1],1,1,0),([-4,0,1],[4,0,1],1,1,1),
++          ([-3,0,1],[3,0,1],.5,1,0)]
++    with patch.object(sections,'MAX_SECTION_PIECES',1),patch.object(sections,'MAX_UNION_VERTICES',5):
++        actual=extract(rows,point(component=True),compact_budget=budget())
++    assert actual['status']=='COMPLETE'
++    assert actual['area_mm2']==8
++    assert actual['tools']==[0,1]
++
++
++def test_streaming_geos_failure_withholds_only_affected_cut_and_releases_storage():
++    from shapely.errors import GEOSException
++    from print_strength_engine import compact_sections
++    first=point();second=point();second.update(region_id='second-plane',section_station_mm=1.5,
++        axial_section_station_mm=1.5,bending_section_station_mm=1.5)
++    shared=budget()
++    with patch.object(sections,'MAX_SECTION_PIECES',1),patch.object(compact_sections,'UNION_CHUNK_PIECES',2):
++        writer=sections.StreamingSections([first,second],compact_budget=shared)
++        with patch.object(compact_sections,'union_all',side_effect=GEOSException('synthetic topology failure')):
++            for row in roads():writer.segment(*row)
++        writer.segment([-4,0,2],[4,0,2],1,1,0)
++        result=writer.finish()
++    assert result['synthetic-plane']['status']=='WITHHELD'
++    assert 'INVALID_LOCAL_SECTION_UNION' in result['synthetic-plane']['assessment_gaps']
++    assert result['second-plane']['status']=='COMPLETE'
++
++
++def test_point_only_contact_does_not_attribute_another_tool_to_selected_component():
++    rows=[([0,0,1],[8,0,1],1,1,0),([10,0,1],[11,0,1],.5,1,1),
++          ([11,.75,1],[12,.75,1],1,1,2)]
++    with patch.object(sections,'MAX_SECTION_PIECES',1):actual=extract(rows,point(component=True),compact_budget=budget())
++    assert actual['status']=='COMPLETE'
++    assert actual['area_mm2']==.5
++    assert actual['tools']==[1]
++
++
++def test_compacted_z_station_keeps_positive_axis_one_sided_layer_boundary():
++    candidate=point();candidate.update(section_station_mm=1,axial_section_station_mm=1,
++                                       bending_section_station_mm=1,section_window_bounds_mm=[[-20,20],[-20,20],[0,3]])
++    rows=[([-4,0,1],[4,0,1],10,1,0),([-4,0,2],[4,0,2],1,1,1),([-4,.5,2],[4,.5,2],1,1,1)]
++    with patch.object(sections,'MAX_SECTION_PIECES',1):actual=extract(rows,candidate,compact_budget=budget())
++    assert actual['status']=='COMPLETE'
++    assert actual['area_mm2']==12
++    assert actual['tools']==[1]
++
++
++@pytest.mark.parametrize('chunk',[1,2,2048])
++@pytest.mark.parametrize('reverse',[False,True])
++def test_small_union_oracle_preserves_holes_components_point_touch_and_narrow_gap(chunk,reverse):
++    from shapely import union_all
++    from shapely.geometry import box
++    from print_strength_engine import compact_sections
++    pieces=[box(-5,-5,5,-4),box(-5,4,5,5),box(-5,-4,-4,4),box(4,-4,5,4),
++            box(7,0,8,1),box(8,1,9,2),box(10,0,11,1),box(11.0001,0,12,1)]
++    expected=union_all(pieces,grid_size=0)
++    with patch.object(compact_sections,'UNION_CHUNK_PIECES',chunk):
++        compact=compact_sections.CompactCutUnion(2,True,budget(),max_vertices=1000000)
++        for shape in reversed(pieces) if reverse else pieces:
++            compact.add(tuple(shape.exterior.coords[:-1]),{0})
++        actual,tools=compact.finish()
++    assert actual.equals(expected)
++    assert len(actual.geoms)==len(expected.geoms)
++    assert sum(len(p.interiors) for p in actual.geoms)==1
++    assert set(tools)=={0}
+diff --git a/tests/test_optional_volume_cache_preservation.py b/tests/test_optional_volume_cache_preservation.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_optional_volume_cache_preservation.py
+@@ -0,0 +1,66 @@
++"""A valid declared numeric cache survives optional volume-only budget gaps."""
++from app import automatic_capacity as automatic
++from test_automatic_compact_cache_policy import prepare,write,POLICY,old_budget_fixture
++import pytest
++
++
++def fixture(tmp_path):
++    directory,document,value=prepare(tmp_path)
++    assert value['status']=='COMPLETE'
++    value.pop('section_resource_policy',None)
++    for process in value['local_process'].values():
++        section=process['volume_section']
++        assert section['status']=='WITHHELD'
++        section['assessment_gaps']=['LOCAL_SECTION_GEOMETRY_BUDGET_EXCEEDED']
++        section.pop('resource_compaction',None)
++    return directory,document,value
++
++
++def test_declared_complete_legacy_numeric_cache_survives_optional_volume_budget_only(tmp_path):
++    directory,document,value=fixture(tmp_path);write(directory,value)
++    before=(directory/automatic.FILE).read_bytes()
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++    assert (directory/automatic.FILE).read_bytes()==before
++
++
++def test_actual_unknown_volume_compaction_marker_is_still_rejected(tmp_path):
++    directory,document,value=fixture(tmp_path);value['section_resource_policy']=POLICY
++    for process in value['local_process'].values():
++        process['volume_section']['resource_compaction']={'policy_id':'unknown-policy','attempted':True,
++                                                        'applied':False,'status':'RESOURCE_BUDGET_EXCEEDED'}
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def marker(*,applied):
++    return {'policy_id':POLICY['id'],'attempted':True,'applied':applied,
++            'status':'APPLIED' if applied else 'RESOURCE_BUDGET_EXCEEDED',
++            'max_packed_bytes':POLICY['max_packed_bytes'],
++            'peak_shared_packed_bytes':POLICY['max_packed_bytes']+1,'peak_shared_coordinates':100}
++
++
++@pytest.mark.parametrize('field,bad',[
++    ('max_packed_bytes',None),('max_packed_bytes',float(POLICY['max_packed_bytes'])),
++    ('max_packed_bytes',2*POLICY['max_packed_bytes']),
++    ('peak_shared_packed_bytes',True),('peak_shared_packed_bytes',-1),('peak_shared_packed_bytes',1.5),
++    ('peak_shared_coordinates',False),('peak_shared_coordinates',-1),('peak_shared_coordinates',1.5)])
++def test_compaction_resource_marker_rejects_invalid_limits_and_peak_types(tmp_path,field,bad):
++    directory,document,value=fixture(tmp_path);value['section_resource_policy']=POLICY
++    for section in value['sections'].values():section['resource_compaction']={**marker(applied=True),field:bad}
++    write(directory,value)
++    assert not automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_applied_marker_can_share_peak_from_another_cut_rejected_above_cap(tmp_path):
++    directory,document,value=fixture(tmp_path);value['section_resource_policy']=POLICY
++    for section in value['sections'].values():section['resource_compaction']=marker(applied=True)
++    write(directory,value)
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
++
++
++def test_failed_compact_marker_with_valid_resource_fields_remains_terminal(tmp_path):
++    directory,document,value=prepare(tmp_path);value=old_budget_fixture(value)
++    value['section_resource_policy']=POLICY
++    for section in value['sections'].values():section['resource_compaction']=marker(applied=False)
++    write(directory,value)
++    assert automatic.current(directory,document,source_sha256='synthetic-source',archive_member='')
+diff --git a/tests/test_small_force_display.py b/tests/test_small_force_display.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_small_force_display.py
+@@ -0,0 +1,119 @@
++"""Positive conditional loads must not disappear through display rounding."""
++import json
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import unittest
++
++from app.strength_points import force_label
++from app import strength_points
++from app.report_capacity_layout import summary_columns, technical_rows
++
++
++ROOT = Path(__file__).resolve().parents[1]
++TINY_ACTUAL_COMPONENT_N = 2.4697387029245935e-6
++POSITIVE_SMALL_FORCES = (5e-324, 1e-300, 1e-20, 1e-8, 1e-6, TINY_ACTUAL_COMPONENT_N,
++                         .00009999, .0001, .001, .004903325, .00980665, .00999)
++
++
++class SmallForceDisplayTests(unittest.TestCase):
++    def test_positive_tiny_section_dimensions_do_not_display_as_zero(self):
++        for value, expected in [(0.0017720391508049347, '0.00177'), (1.3207e-6, '1.32e-6'),
++                                (0, '0.00'), (11.03, '11.03'), (1.62, '1.62')]:
++            with self.subTest(value=value):
++                self.assertEqual(strength_points.section_measure_label(value), expected)
++
++    def test_tiny_selected_section_is_visible_in_report_summary_and_detail(self):
++        capacity = {'calculation_status': 'AUTOMATIC_REFERENCE_LOAD_ESTIMATE',
++            'bending_force_n': TINY_ACTUAL_COMPONENT_N, 'axial_capacity_n': .08284283,
++            'section_modulus_mm3': 1.3207e-6,
++            'bending_lever_mm': 25, 'effective_load_bearing_area_mm2': .0017720391508049347,
++            'geometry_scenarios': {'selected_geometry': 'DECLARED_ROADS',
++                'selected_axial_geometry': 'DECLARED_ROADS',
++                'declared': {'area_mm2': .0017720391508049347}}}
++        candidate = {'kind': 'LOCAL_THIN_SECTION', 'position_mm': [0, 0, 1], 'rank': 1,
++            'layer_number': 17, 'estimated_capacity': capacity,
++            'deposited_section': {'axial': {'area_mm2': .0017720391508049347},
++                                  'bending': {'area_mm2': .0017720391508049347}}}
++        summary = json.dumps(summary_columns(candidate), ensure_ascii=False)
++        detail = '\n'.join(strength_points.geometry_scenario_report_lines(capacity))
++        self.assertIn('0.00177 mm²', summary)
++        self.assertIn('0.00177 mm²', detail)
++        self.assertNotIn('0.00 mm²', summary + detail)
++        appendix = json.dumps(technical_rows(candidate), ensure_ascii=False)
++        self.assertIn('굽힘 단면계수 1.32e-6 mm³', appendix)
++
++    def test_actual_dense_section_positive_force_is_visible_in_reports(self):
++        text = force_label(TINY_ACTUAL_COMPONENT_N)
++        self.assertIn('0.252 mg', text)
++        self.assertIn('2.47e-6 N', text)
++        self.assertNotIn('0.00 N', text)
++
++    def test_subgram_positive_force_uses_significant_digits(self):
++        self.assertIn('0.500 g', force_label(.004903325))
++        self.assertIn('0.00490 N', force_label(.004903325))
++
++    def test_small_positive_numeric_labels_never_become_zero(self):
++        for value in POSITIVE_SMALL_FORCES:
++            with self.subTest(value=value):
++                match = re.fullmatch(r'약 (.+) 무게 · (.+) N', force_label(value))
++                self.assertIsNotNone(match)
++                self.assertGreater(float(match[2]), 0)
++                self.assertGreater(float(match[1].split()[0]), 0)
++
++    def test_zero_missing_and_ordinary_values_keep_existing_meaning(self):
++        self.assertEqual(force_label(0), '약 0 g 무게 · 0.00 N')
++        for value in (None, -1, float('nan'), float('inf')):
++            with self.subTest(value=value):
++                self.assertEqual(force_label(value), '미산출')
++        self.assertEqual(force_label(1.84), '약 188 g 무게 · 1.84 N')
++        self.assertEqual(force_label(.024516625), '약 2 g 무게 · 0.02 N')
++        self.assertEqual(force_label(.495235825), '약 50 g 무게 · 0.50 N')
++        self.assertEqual(force_label(177.8199148), '약 18 kg 무게 · 178 N · 18.1 kgf')
++
++    @unittest.skipUnless(shutil.which('node'), 'Node is required for browser formatting regression')
++    def test_viewer_short_and_expanded_forces_preserve_positive_values(self):
++        source = (ROOT/'app/web/gcode-viewer.js').read_text(encoding='utf-8')
++        helpers = source[source.index('  function formatForce(newtons)'):source.index('  window.PrintOpsFormatForce=')]
++        code = "const assert=require('node:assert/strict');" + helpers
++        code += 'const tiny=' + json.dumps(TINY_ACTUAL_COMPONENT_N) + ';'
++        expected = []
++        for value in POSITIVE_SMALL_FORCES:
++            match = re.fullmatch(r'약 (.+) 무게 · (.+) N', force_label(value))
++            expected.append([value, match[1], match[2]])
++        code += 'const vectors=' + json.dumps(expected) + ';'
++        code += """
++for (const format of [formatForce,formatForceShort]) {
++  assert(format(tiny).includes('0.252 mg'));
++  assert(format(tiny).includes('2.47e-6 N'));
++  assert(!format(tiny).includes('0.00 N'));
++  assert(format(.004903325).includes('0.500 g'));
++  assert(format(.004903325).includes('0.00490 N'));
++  assert(format(0).includes('0.00 N'));
++  for (const value of [null,undefined,-1,NaN,Infinity]) assert.equal(format(value),'미산출');
++}
++assert.equal(formatForceShort(1.84),'약 188 g · 1.84 N');
++assert.equal(formatForceShort(177.8199148),'약 18 kg · 178 N');
++assert.equal(formatForceShort(.142196425),'약 14 g · 0.14 N');
++for (const [value,weight,newtons] of vectors) {
++  assert.equal(formatForceShort(value),`약 ${weight} · ${newtons} N`);
++}
++function isLoadCandidate() { return true; }
++const area=.0017720391508049347, modulus=1.3207e-6;
++const view=candidateCapacityView({deposited_section:{status:'COMPLETE'},estimated_capacity:{
++  calculation_status:'AUTOMATIC_REFERENCE_LOAD_ESTIMATE',bending_force_n:tiny,axial_capacity_n:.08284283,
++  bending_lever_mm:25,effective_load_bearing_area_mm2:area,section_modulus_mm3:modulus,
++  bending_scenarios:[10,25,50].map(lever_mm=>({lever_mm,force_n:tiny*25/lever_mm}))
++}});
++assert(view.area.includes('0.00177 mm²'));
++assert(view.area.includes('1.32e-6 mm³'));
++assert(!view.area.includes('0.00 mm'));
++"""
++        result = subprocess.run([shutil.which('node')], input=code,
++                                capture_output=True, text=True, encoding='utf-8')
++        self.assertEqual(result.returncode, 0, result.stderr)
++
++
++if __name__ == '__main__':
++    unittest.main()
