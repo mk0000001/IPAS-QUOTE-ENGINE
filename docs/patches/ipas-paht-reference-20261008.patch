@@ -1,0 +1,264 @@
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,7 +1,7 @@
+ import os
+ from pathlib import Path
+ 
+-VERSION = '0.5.27-reference-capacity'
++VERSION = '0.5.28-paht-reference'
+ 
+ def secret(name: str) -> str:
+     file = os.getenv(name + '_FILE')
+diff --git a/app/filament_profiles.py b/app/filament_profiles.py
+--- a/app/filament_profiles.py
++++ b/app/filament_profiles.py
+@@ -181,7 +181,11 @@
+     product = candidates.get(_key(body))
+     material = _material_for_grade(product or body, catalog_confirmed=brand == 'FusRock' and product is not None)
+     if material and supplied_hint and material != supplied_hint:
+-        if (brand == 'FusRock' and product is not None and
++        if brand == 'Bambu' and product == 'PAHT-CF' and supplied_hint == 'PA-CF':
++            # Bambu's exact PAHT-CF system profile (GFN04) declares PA-CF.
++            # This documented coarse hint does not equate other nylon grades.
++            reasons.append('OFFICIAL_EXACT_PRODUCT_COARSE_GCODE_HINT')
++        elif (brand == 'FusRock' and product is not None and
+                 re.sub(r'-(?:CF|GF)$', '', material) == supplied_hint):
+             # Slicers can label the polymer family while the exact official
+             # profile names its reinforcement. Keep the specific product.
+diff --git a/app/strength_reference.py b/app/strength_reference.py
+--- a/app/strength_reference.py
++++ b/app/strength_reference.py
+@@ -263,6 +263,13 @@
+     raw=report.get('raw_reference_mpa') or {}
+     if raw:
+         notes.append(f"원자료 {report.get('reference_product') or '소재 자료'}: XY {raw.get('XY','—')} / Z {raw.get('Z','—')} MPa.")
++    if (report.get('reference_product')=='Bambu Lab PAHT-CF' and
++            report.get('source_ref')=='https://store.bblcdn.com/7166b20bc68f4c87b32c972b856eeb4b.pdf'):
++        notes.append('PAHT-CF 참고값은 건조·열처리 시험편 기준이며 현재 출력물의 수분·열처리 상태는 확인되지 않았습니다.')
++        if include_internal:
++            notes.append('제조사 시험 조건: 노즐 290°C · 베드 100°C · 속도 100 mm/s · 인필 100% · 80°C에서 12시간 열처리·건조한 건조 상태 시험편입니다.')
++            notes.append('제조사 표의 XY ±7 MPa / Z ±5 MPa는 통계적 정의가 없어 표준편차나 신뢰구간으로 해석하지 않습니다. 응력 면적 정의와 현재 출력 조건으로의 물성 전이도 확인되지 않았습니다.')
++            notes.append(f"소재 원출처: {report.get('source_version')} · {report['source_ref']}")
+     if report.get('metric_comparability') == 'SOURCE_LABEL_CONFLICT_ENDPOINT_COMPARABILITY_UNVERIFIED':
+         notes.append('제조사 제품 페이지의 원표기: XY 인장 파단강도 / Z 인장강도. 비교표와 제품 페이지의 Z 지표 명칭이 달라 동일한 파단 지표로 검증되지 않았습니다. 수치는 조건부 소재 참고값이며 최약 방향·실제 파단하중을 확정하지 않습니다.')
+     if report.get('directional_reference_mpa'):
+@@ -379,6 +386,32 @@
+                 '0.85는 기존 내부 여유계수이며 실측 보정계수나 검증된 안전율이 아닙니다.',
+                 '공식 출력 범위와 현재 G-code 조건의 비교는 경고용이며 강도값에 임의 배율로 적용하지 않습니다.',
+                 '표시 MPa는 제조사 시편의 소재 참고값이며 현재 부품의 인필·벽·접합·형상·하중에서 검증된 파단 강도가 아닙니다.'])
++        return report
++    if materials in (['PA-CF'], ['PAHT-CF']) and products == {'bambu paht-cf'}:
++        # Exact product only: Bambu's PA-CF slicer tag is not a PA6/PA12 proxy.
++        # The outer reference_inputs boundary preserves these raw coupon values
++        # and applies the existing 0.85 margin once to capacity inputs only.
++        report.update(status='REFERENCE_ONLY', reference_product='Bambu Lab PAHT-CF',
++            reference_kind='SLICER_PROFILE_REFERENCE_NOT_VERIFIED_SPOOL',
++            source_ref='https://store.bblcdn.com/7166b20bc68f4c87b32c972b856eeb4b.pdf',
++            source_sha256='6bacdcd4acd3f7ca650217d1c2352f5dbc3c4f676f9196a564a05f5da8ef5f11',
++            source_checked_at='2026-10-08', source_version='Technical Data Sheet V3.0',
++            source_locator='p. 2 dry-state tensile strength; p. 3 specimen printing and conditioning',
++            raw_reference_mpa={'XY':'92','Z':'47'}, internal_conservative_factor='0.85',
++            source_metric_labels={'XY':'Tensile Strength (X-Y)','Z':'Tensile Strength (Z)'},
++            source_reported_spread_mpa={'XY':'7','Z':'5'}, source_reported_spread_kind='UNDEFINED',
++            stress_area_basis='UNKNOWN',
++            source_area_description='PRINTED_TENSILE_COUPON_AREA_DEFINITION_UNCONFIRMED',
++            actual_moisture_state='UNKNOWN', actual_annealing_state='UNKNOWN',
++            weakest_direction='Z (소재 참조값 기준)', calibration_status='UNVALIDATED_INTERNAL_MARGIN',
++            test_conditions={'infill_percent':100,'nozzle_c':290,'bed_c':100,'speed_mm_s':100,
++                'conditioning':'80°C에서 12시간 열처리·건조','moisture_state':'DRY',
++                'test_standard':'ISO 527 / GB/T 1040'},
++            limitations=['파일의 Bambu PAHT-CF 프로파일에 해당하는 제조사 TDS를 참조합니다. 실제 장착 스풀의 제품을 인증한 것은 아닙니다.',
++                '원자료는 인필 100%, 노즐 290°C, 베드 100°C, 속도 100 mm/s로 출력 후 80°C에서 12시간 열처리·건조한 건조 상태 시험편 기준입니다.',
++                '제조사 표의 ±7 MPa(XY), ±5 MPa(Z)는 통계적 정의가 없어 표준편차나 신뢰구간으로 해석하지 않습니다. 응력 면적 정의와 현재 출력물의 수분·열처리 상태도 확인되지 않았습니다.',
++                'PA-CF는 이 정확한 Bambu PAHT-CF 프로파일의 공식 슬라이서 소재 표기입니다. Generic PA-CF, PA6-CF 또는 PA12-CF 제품에 이 수치를 대신 적용하지 않습니다.',
++                '표시 MPa는 소재 시편 참고값이며 현재 부품의 형상·하중 조건에서 검증된 파단 강도가 아닙니다.'])
+         return report
+     bambu_basic=materials==['PLA'] and bool(products) and all(re.fullmatch(r'bambu(?: lab)? pla basic',p) for p in products)
+     if materials==['PLA'] and any(re.match(r'bambu(?: lab)? pla\b',p) for p in products) and not bambu_basic:
+diff --git a/app/web/index.html b/app/web/index.html
+--- a/app/web/index.html
++++ b/app/web/index.html
+@@ -16,7 +16,7 @@
+   <link rel="stylesheet" href="/web/styles.css?v=20261008-ipas">
+   <script defer src="/web/load-case.js?v=20261003-profile-match"></script>
+   <script defer src="/web/gcode-viewer.js?v=20261008-reference-capacity"></script>
+-  <script defer src="/web/app.js?v=20261008-reference-capacity"></script>
++  <script defer src="/web/app.js?v=20261008-paht-reference"></script>
+ </head>
+ <body>
+   <a class="skip-link" href="#calculator">계산기로 바로가기</a>
+diff --git a/tests/test_paht_exact_reference.py b/tests/test_paht_exact_reference.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_paht_exact_reference.py
+@@ -0,0 +1,169 @@
++"""Only the exact Bambu PAHT-CF profile earns its documented TDS comparator."""
++from copy import deepcopy
++
++import pytest
++
++from app.filament_profiles import enrich_analysis, parse
++from app.strength_reference import capacity_reference, reference_for_subset, summarize
++
++
++SOURCE = 'https://store.bblcdn.com/7166b20bc68f4c87b32c972b856eeb4b.pdf'
++
++
++def analysis(profile='Bambu PAHT-CF @BBL H2C', material='PA-CF'):
++    return {'detected_materials': [material], 'tool_ids': [0],
++            'material_usage': [{'tool_id': 0, 'material': material, 'sku_profile': profile,
++                                'grams': '10', 'used_for_object': True}],
++            'configuration': {'filament_settings_id': [profile], 'filament_type': [material]}}
++
++
++def test_official_paht_profile_accepts_its_coarse_hint_without_rewriting_metadata():
++    source = analysis('Bambu PAHT-CF @base')
++    before = deepcopy(source)
++    identity = enrich_analysis(source)['material_usage'][0]['profile_identity']
++    assert identity['match_status'] == 'matched'
++    assert identity['canonical_profile'] == 'Bambu PAHT-CF'
++    assert identity['material'] == 'PAHT-CF'
++    assert identity['material_hint'] == 'PA-CF'
++    assert identity['raw_profile'] == 'Bambu PAHT-CF @base'
++    assert 'OFFICIAL_EXACT_PRODUCT_COARSE_GCODE_HINT' in identity['reasons']
++    assert source == before
++
++
++def test_configuration_bound_paht_identity_retains_its_source_provenance():
++    source = analysis('Bambu PAHT-CF @BBL H2C')
++    source['material_usage'][0]['sku_profile'] = None
++    before = deepcopy(source)
++    identity = enrich_analysis(source)['material_usage'][0]['profile_identity']
++    assert identity['match_status'] == 'matched'
++    assert identity['raw_profile'] == ''
++    assert identity['source_profile'] == 'Bambu PAHT-CF @BBL H2C'
++    assert identity['profile_source'] == 'CONFIGURATION_TOOL_SLOT'
++    assert identity['source_tool_id'] == 0
++    assert identity['configuration_index'] == 0
++    assert identity['material_hint'] == 'PA-CF'
++    assert summarize(source)['raw_reference_mpa'] == {'XY': '92', 'Z': '47'}
++    assert source == before
++
++
++@pytest.mark.parametrize('material', ['PLA', 'PA6-CF', 'PA12-CF'])
++def test_paht_profile_rejects_other_explicit_polymer_hints(material):
++    identity = parse('Bambu PAHT-CF @BBL H2C', material)
++    assert identity['match_status'] == 'conflict'
++    assert 'MATERIAL_HINT_CONFLICT' in identity['reasons']
++    report = summarize(analysis(material=material))
++    assert report['reference_kind'] == 'PROFILE_IDENTITY_CONFLICT'
++    assert report.get('raw_reference_mpa') in (None, {})
++    assert capacity_reference(report) is None
++
++
++@pytest.mark.parametrize('profile', ['eSUN PAHT-CF', 'Bambu PA6-CF', 'Bambu PA12-CF'])
++def test_coarse_pa_cf_hint_is_not_a_general_nylon_grade_equivalence(profile):
++    identity = parse(profile, 'PA-CF')
++    assert identity['match_status'] == 'conflict'
++    assert 'MATERIAL_HINT_CONFLICT' in identity['reasons']
++    report = summarize(analysis(profile))
++    assert report.get('raw_reference_mpa') in (None, {})
++
++
++@pytest.mark.parametrize('profile', ['Generic PA-CF', 'PA-CF', 'Bambu PA-CF', 'Generic PAHT-CF'])
++def test_generic_or_unspecified_pa_cf_never_borrows_exact_paht_values(profile):
++    report = summarize(analysis(profile))
++    assert report.get('reference_product') != 'Bambu Lab PAHT-CF'
++    assert report.get('raw_reference_mpa') in (None, {})
++    assert capacity_reference(report) is None
++
++
++def test_pa6_profile_with_pa12_hint_remains_a_conflict():
++    identity = parse('Bambu PA6-CF', 'PA12-CF')
++    assert identity['match_status'] == 'conflict'
++    assert summarize(analysis('Bambu PA6-CF', 'PA12-CF'))['reference_kind'] == 'PROFILE_IDENTITY_CONFLICT'
++
++
++@pytest.mark.parametrize('material', ['PA-CF', 'PAHT-CF'])
++def test_exact_paht_source_keeps_raw_coupon_values_and_applies_margin_only_to_capacity(material):
++    source = analysis(material=material)
++    before = deepcopy(source)
++    report = summarize(source)
++    assert report['status'] == 'REFERENCE_ONLY'
++    assert report['reference_kind'] == 'SLICER_PROFILE_REFERENCE_NOT_VERIFIED_SPOOL'
++    assert report['reference_product'] == 'Bambu Lab PAHT-CF'
++    assert report['source_ref'] == SOURCE
++    assert report['source_version'] == 'Technical Data Sheet V3.0'
++    assert report['raw_reference_mpa'] == {'XY': '92', 'Z': '47'}
++    assert report['directional_reference_mpa'] == {'X': '92', 'Y': '92', 'Z': '47'}
++    assert report['directional_capacity_reference_mpa'] == {'X': '78.2', 'Y': '78.2', 'Z': '39.95'}
++    assert report['reference_margin_applied'] is False
++    assert report['capacity_margin_applied'] is True
++    assert report['stress_area_basis'] == 'UNKNOWN'
++    assert report['test_conditions']['infill_percent'] == 100
++    assert report['test_conditions']['nozzle_c'] == 290
++    assert report['test_conditions']['bed_c'] == 100
++    assert report['test_conditions']['speed_mm_s'] == 100
++    assert report['test_conditions']['conditioning'] == '80°C에서 12시간 열처리·건조'
++    assert report['test_conditions']['moisture_state'] == 'DRY'
++    assert report['test_conditions']['test_standard'] == 'ISO 527 / GB/T 1040'
++    assert report['source_reported_spread_mpa'] == {'XY': '7', 'Z': '5'}
++    assert report['source_reported_spread_kind'] == 'UNDEFINED'
++    assert report['actual_moisture_state'] == 'UNKNOWN'
++    assert report['actual_annealing_state'] == 'UNKNOWN'
++    assert source == before
++
++
++def test_exact_same_product_multiple_tools_receive_explicit_common_product_proof():
++    from app.strength_points import attach_capacity
++    from print_strength_engine.automatic_sections import StreamingSections
++    source = analysis()
++    second = deepcopy(source['material_usage'][0])
++    second.update(tool_id=3, sku_profile='Bambu Lab PAHT-CF @BBL A1')
++    source['material_usage'].append(second)
++    source['tool_ids'] = [0, 3]
++    source['configuration'] = {'filament_settings_id': [source['material_usage'][0]['sku_profile'],
++                                                       second['sku_profile']],
++                               'filament_type': ['PA-CF', 'PA-CF']}
++    candidate = {'kind': 'COMPONENT_REFERENCE_SECTION', 'region_id': 'paht-two-tools',
++                 'layer_number': 1, 'z_mm': .2, 'position_mm': [5., 5., .1],
++                 'section_normal_axis': 'Z', 'section_station_mm': .1,
++                 'axial_section_station_mm': .1, 'bending_section_station_mm': .1,
++                 'section_window_bounds_mm': [[-1., 11.], [-1., 11.], [0., .4]],
++                 'bounds_mm': [[-1., 11.], [-1., 11.], [0., .4]],
++                 'material_area_proxy_mm2': 4}
++    writer = StreamingSections([candidate])
++    writer.segment([1, 2, .2], [5, 2, .2], 1, .2, 0)
++    writer.segment([5, 2, .2], [9, 2, .2], 1, .2, 3)
++    candidate['deposited_section'] = writer.finish()[candidate['region_id']]
++    before = deepcopy(candidate)
++    row = attach_capacity([candidate], None, source)[0]
++    value = row.get('estimated_capacity') or {}
++    assert value.get('calculation_status') == 'AUTOMATIC_REFERENCE_LOAD_ESTIMATE'
++    assert value['axial_capacity_n'] > 0
++    assert value['bending_force_n'] > 0
++    proof = row['capacity_material_reference']['common_product_tool_reference']
++    assert proof['basis'] == 'IDENTICAL_EXACT_PRODUCT_COUPON_REFERENCE_PER_TOOL'
++    assert proof['tool_ids'] == [0, 3]
++    assert proof['verified'] is False
++    assert proof['source_ref'] == SOURCE
++    assert proof['raw_reference_mpa'] == {'XY': '92', 'Z': '47'}
++    assert proof['stress_area_basis'] == 'UNKNOWN'
++    assert candidate == before
++    for tool in (0, 3):
++        subset = reference_for_subset(source, [tool])
++        assert subset['reference_product'] == 'Bambu Lab PAHT-CF'
++        assert subset['raw_reference_mpa'] == proof['raw_reference_mpa']
++
++
++def test_paht_customer_notes_keep_conditioning_caveat_without_internal_test_details():
++    from app.strength_reference import reference_notes
++    notes='\n'.join(reference_notes(summarize(analysis()),include_internal=False))
++    assert '건조·열처리 시험편 기준' in notes
++    assert '현재 출력물의 수분·열처리 상태는 확인되지 않았습니다' in notes
++    for internal in ('290°C','100 mm/s','80°C','±7','V3.0',SOURCE):
++        assert internal not in notes
++
++
++def test_paht_admin_notes_include_exact_source_and_conditioning_without_statistical_claim():
++    from app.strength_reference import reference_notes
++    notes='\n'.join(reference_notes(summarize(analysis()),include_internal=True))
++    for expected in ('건조·열처리 시험편 기준','290°C','100°C','100 mm/s','인필 100%',
++                     '80°C','12시간','±7','±5','표준편차나 신뢰구간으로 해석하지 않습니다','V3.0',SOURCE):
++        assert expected in notes
