@@ -9,7 +9,10 @@
 
 ## 한국어
 
-최신 호스트 릴리스: [IPAS v0.5.27 예상 하중 기준 단면·전달 검증](docs/ipas-reference-capacity-20261008.md). 얇은 부위가 없어도 지원되는 기준 단면의 하중을 표시하고 동일 제품의 다색 툴을 명시한 접합 가정 아래 계산합니다. G-code v0.28.0·strength v0.25.0·quote v0.13.0이며 가격 정책은 유지합니다. 검증 범위와 보류 사유는 릴리스 문서에 기록합니다.
+최신 호스트 릴리스: [IPAS v0.5.30-compact-sections 대형 단면 예상 하중 복구](docs/ipas-compact-sections-20261008.md). 강도 v0.27.0; 원본·캐시의 최종 검증, 작은 양수 표시와 실제 운영 보존을 연결 문서에 기록합니다.
+
+
+이전 호스트 릴리스: [IPAS v0.5.27 예상 하중 기준 단면·전달 검증](docs/ipas-reference-capacity-20261008.md). 얇은 부위가 없어도 지원되는 기준 단면의 하중을 표시하고 동일 제품의 다색 툴을 명시한 접합 가정 아래 계산합니다. G-code v0.28.0·strength v0.25.0·quote v0.13.0이며 가격 정책은 유지합니다. 검증 범위와 보류 사유는 릴리스 문서에 기록합니다.
 
 이전 호스트 릴리스: [IPAS v0.5.26 프로필 자동 선택·가격 근거 보존](docs/ipas-profile-autoselect-20261008.md).
 
@@ -47,7 +50,10 @@ python -m unittest discover -s tests
 
 ## English
 
-Latest host release: [IPAS v0.5.27 reference-section load delivery](docs/ipas-reference-capacity-20261008.md). Supported section estimates remain available without thin-region candidates, and exact common-product color tools use an explicit bonding assumption. Versions are G-code v0.28.0, strength v0.25.0 and quote v0.13.0; pricing policy is unchanged. See the release document for verified scope and withheld-input reasons.
+Latest host release: [IPAS v0.5.30-compact-sections dense-section reference loads](docs/ipas-compact-sections-20261008.md). Strength v0.27.0; the linked record separates source/cache verification, tiny positive labels and live preservation.
+
+
+Previous host release: [IPAS v0.5.27 reference-section load delivery](docs/ipas-reference-capacity-20261008.md). Supported section estimates remain available without thin-region candidates, and exact common-product color tools use an explicit bonding assumption. Versions are G-code v0.28.0, strength v0.25.0 and quote v0.13.0; pricing policy is unchanged. See the release document for verified scope and withheld-input reasons.
 
 Previous host release: [IPAS v0.5.26 profile auto-selection and price provenance](docs/ipas-profile-autoselect-20261008.md).
 

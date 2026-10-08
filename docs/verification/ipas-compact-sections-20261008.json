@@ -1,0 +1,128 @@
+{
+  "additional_original_selected_stream_passes_for_final_image": 1,
+  "app_version": "0.5.30-compact-sections",
+  "cache_only_printing_evidence_count": 946,
+  "coverage_counts": {
+    "cache_only_printing_evidence_payloads": 946,
+    "controls": 2,
+    "fresh_original_evidence_payloads": 745,
+    "invariant_failures": 0,
+    "new_numeric": 1654,
+    "null": 37,
+    "payloads": 1693,
+    "printing": 1691,
+    "recomputed_geometry_count": 1,
+    "reused_geometry_count": 1690,
+    "unexplained_null": 0
+  },
+  "engine_versions": {
+    "gcode": {
+      "revision_count": 28,
+      "source_commit": "3f687351f8953182f58010f2e17aa685c9632e56",
+      "update_count": 27,
+      "version": "0.28.0"
+    },
+    "quote": {
+      "revision_count": 13,
+      "source_commit": "1178ba904a7c30cca7f861dcabdb36be997eb80e",
+      "update_count": 12,
+      "version": "0.13.0"
+    },
+    "strength": {
+      "revision_count": 27,
+      "source_commit": "25a1ba1fcb5021d438e5c2f581f31d823eb7b5d4",
+      "update_count": 26,
+      "version": "0.27.0"
+    }
+  },
+  "full_strength_tests": {
+    "ordinary_passed": 319,
+    "skipped": 0,
+    "subtests_passed": 710
+  },
+  "geometry_algorithms_unchanged": false,
+  "host_tests": {
+    "ordinary_passed": 982,
+    "skipped": 22,
+    "subtests_passed": 220
+  },
+  "image_digest": "sha256:a8fa50491814f6ca5b6f4413aa9d0971c1f5b60ab13ee5e76884623024be00e9",
+  "measured_part_failure_accuracy_validated": false,
+  "original_selected_stream_passes_in_mixed_model_replay": 0,
+  "original_source_evidence_count": 745,
+  "pdf_page_count": 36,
+  "pdf_report_count": 4,
+  "previous_six_forces_preserved": true,
+  "public_host_patch_commit": "14592d27bf782fae172a3c038764bf8969ec68f4",
+  "public_host_patch_sha256": "706f9d2d27b1c4eed192d91d50afd1339755f7449ca6024c88b5f5519476cbd7",
+  "public_strength_source_commit": "7806089591b09d4f8e1b954a5219a2048eb3ca24",
+  "recomputed_geometry_count": 1,
+  "reused_geometry_count": 1690,
+  "runtime_previous_published_commit_anchor": "25a1ba1fcb5021d438e5c2f581f31d823eb7b5d4",
+  "safe_allowable_load_validated": false,
+  "saved_estimates_preserved": 100,
+  "schema": "IPAS_COMPACT_SECTIONS_PUBLIC_EVIDENCE_V1",
+  "source_freeze_identity_sha256": "b38289dc4bfc91928052c899fee34439b1ed647aff80c51b0a994ce584c0fcd8",
+  "status": "PASS",
+  "strength_revision_count": 27,
+  "strength_update_count": 26,
+  "target": {
+    "all_six_numeric": true,
+    "compute_artifacts_sha256": {
+      "auto-capacity-v1.json": "714b7178272aa68d6f8b0acd2687231271200c7bd11447f76abd701a2b48fa7b",
+      "layer-profile.json": "5568bc63664a18606846097f946de3f780df7b1169774341df44a9fe396a3718",
+      "local-strength-v4.json": "37edcbc2800aaba9e9ff22dfe71662ef924db34b421fb320c8903bbcd493e799",
+      "manifest.json": "434391c7bdd188bf920a781f35de2a748928933f735326afba793eba0036f94a"
+    },
+    "geometry_scope": "LOCAL_DECLARED_ROAD_COMPONENT_REFERENCE_NOT_WHOLE_PART_FAILURE",
+    "peak_rss_bytes": 971005952,
+    "selected_stream_proof": {
+      "actual_sha256": "dd852d386aad73d004bd5cf6ab831561f692c653dc74f187433c0907a5160b9b",
+      "consumed_bytes": 44778265,
+      "expected_bytes": 44778265,
+      "expected_sha256": "dd852d386aad73d004bd5cf6ab831561f692c653dc74f187433c0907a5160b9b",
+      "reached_eof": true
+    },
+    "source_bytes": 44778265,
+    "source_sha256": "dd852d386aad73d004bd5cf6ab831561f692c653dc74f187433c0907a5160b9b"
+  },
+  "trace_receipt_sha256": {
+    "build-latest.json": "d50bffc66cb7ec7db7c10e9b73426397cae7aaeb142b8325bab6c7a63b60370d",
+    "coverage/results.jsonl": "4ae35b8e78b4effacf919f259debaba5ee54dfced00688f760a420a8548d3df7",
+    "coverage/summary.json": "38c81414aec2425909ec5e905597aa659412fc8c43fbccb43a58a58900716177",
+    "deployment-latest.json": "64893eac69741dbffd0794507588573494d0d0a48c8756672217081f708df4c5",
+    "engine-github-publication.json": "032dbc0e35363ed6305bec0199ae65501990c242a8f56f2bb895b4803d25f993",
+    "image-qa-latest.json": "bdc2fe2a3bc943c721049d248e18a3e5c3cca759ca2aa703fd46257ee030013d",
+    "image-visual-review.json": "136e7569decbc4f9840d60bbf2baf015d2a1133876933ed91945ad6add04e085",
+    "independent-audit.json": "650c91efd8baae5a5f37ad884d946a92fd74533b9707b33e8e6911afc456f039",
+    "integration-latest.json": "919e7b83f59cdbc84a2aa9a4ee8a7d69acd6ecbc99f18c1af52b614cded4dcb1",
+    "live-verification.json": "46bef4f2d2666777e67e752e3f3d94c420697ced4cee461ce14fe668890ab4ee",
+    "patch-github-publication.json": "a3ab00ed30ff388140b084819eb6e82a5c72a0c96fa4af3eba76dba0b98492e9",
+    "preservation-preflight.json": "4161dffde5593a88942f3228a242f2e1a130cdc9d924326f8ce3e8c936771662",
+    "public-patch-verification.json": "0dc1501d1d9487379606c31ac3b2dede086aff962ef578c067b241f9f40c8f52",
+    "source-freeze.json": "b51a05ce222e0756e3e2dea2b61b23a24a2e51e6e025919d02cff1b6387bf3ca",
+    "strength-qa-latest.json": "666c5a9fb10c23f6d659a1a24ccf6178be82976ba91b0a9574d52a47b5b28240",
+    "target-image-geometry.json": "dd5ac842bf47d40d4809a5095bd27e68b02d22d73f4cf094563700a140c35663"
+  },
+  "universal_process_calibration_validated": false,
+  "visual_page_count": 36,
+  "withheld_reason_counts": {
+    "ACTUAL_LOAD_AND_RESTRAINTS_UNKNOWN": 1,
+    "COMPLETE_DEPOSITION_GEOMETRY_REQUIRED": 1,
+    "DECLARED_ROAD_DIMENSIONS_REQUIRED": 13,
+    "EXCLUDED_DEPOSITION_ARCS": 2,
+    "EXPLICIT_LOAD_CASE_REQUIRED": 1,
+    "INCOMPLETE_SOURCE_SCAN": 29,
+    "LOCAL_SECTION_GEOMETRY_BUDGET_EXCEEDED": 1,
+    "MATERIAL_DIRECTIONAL_REFERENCE_UNAVAILABLE:INSUFFICIENT_DATA": 20,
+    "MULTITOOL_NO_SUPPORTED_COMPLETE_COMMON_EXACT_PRODUCT_SCENARIO": 1,
+    "MULTITOOL_STIFFNESS_UNVERIFIED": 1,
+    "NONPLANAR_DEPOSITION_UNSUPPORTED": 14,
+    "NOTCH_AND_CRACK_FAILURE_NOT_SOLVED": 1,
+    "NO_BOUNDED_REFERENCE_OR_LOCAL_CANDIDATES": 3,
+    "NO_LOCAL_DEPOSITED_SECTION": 1,
+    "NO_OBSERVED_MODEL_REFERENCE_CANDIDATES": 3,
+    "SECTION_WITHHELD": 1,
+    "VOID_AND_CONTACT_GEOMETRY_UNKNOWN": 1
+  }
+}

@@ -1,3 +1,6 @@
+> **과거 부분 진행 기록:** 이 문서는 당시 상태를 보존합니다. 최종 결과는 [2026-10-09 전수 검증 완료 기록](ipas-corpus-completion-20261009.md)을 확인하세요.
+> **Historical partial snapshot:** This document preserves its original state. See the [2026-10-09 corpus completion record](ipas-corpus-completion-20261009.md) for the final result.
+
 # IPAS 예상 하중 기준 단면·전달 검증 / Reference-section load delivery
 
 [한국어](#한국어) · [English](#english)
